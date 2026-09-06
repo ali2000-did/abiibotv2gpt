@@ -63,12 +63,27 @@ PHONE_BEHIND_BUTTON = {f"shop-{i}" for i in range(8, 45, 4)} & {
     s for s, d in SHOPS.items() if d["phone"]
 }
 
-# فروشگاه‌هایی که endpoint_APIشان (مثل دنیای واقعی) پاسخ 404 می‌دهد
+# ─── فروشگاه‌هایی که وب‌سایت اختصاصی دارند (مثل دنیای واقعی) ───
+# دیتای سایت شخصی: شماره و ایمیلی که در API ترب نیست — اثبات غنی‌سازی
+SHOP_SITES: dict[str, dict] = {}  # sid → {"extra_phone": ..., "email": ...}
+_idx = 0
+for _sid in sorted(SHOPS, key=lambda s: int(s.split("-")[1])):
+    _n = int(_sid.split("-")[1])
+    if _n >= 5 and SHOPS[_sid]["phone"]:
+        _idx += 1
+        SHOP_SITES[_sid] = {
+            "extra_phone": f"0921{_n:02d}{_idx:07d}"[:11],  # فقط روی سایت شخصی
+            "email": f"shop{_n}@example-seller.ir",
+        }
+        if len(SHOP_SITES) >= 6:
+            break
+
+# ─── فروشگاه‌هایی که endpoint APIشان (مثل دنیای واقعی) پاسخ 404 می‌دهد ───
 # → موتور باید با fallback صفحه وب، شماره را بازیابی کند
 API_BROKEN_SHOPS: list[str] = []
 for _sid in sorted(SHOPS, key=lambda s: int(s.split("-")[1])):
     _n = int(_sid.split("-")[1])
-    if _n >= 5 and SHOPS[_sid]["phone"] and _sid not in PHONE_BEHIND_BUTTON:
+    if _n >= 5 and SHOPS[_sid]["phone"] and _sid not in PHONE_BEHIND_BUTTON and _sid not in SHOP_SITES:
         API_BROKEN_SHOPS.append(_sid)
         if len(API_BROKEN_SHOPS) == 3:
             break
@@ -258,8 +273,8 @@ def api_offers(prk: str) -> dict:
     return {"result": {"offer_list": offers, "count": len(offers)}}
 
 
-def api_shop(sid: str):
-    """پاسخ API فروشگاه — None یعنی HTTP 404 (فروشگاه API-شان خراب است)."""
+def api_shop(sid: str, base: str = ""):
+    """پاسخ API فروشگاه — None یعنی HTTP 404 (فروشگاه API‌شان خراب است)."""
     s = SHOPS.get(sid)
     if not s or sid in API_BROKEN_SHOPS:
         return None
@@ -269,9 +284,29 @@ def api_shop(sid: str):
         "name": s["name"], "shop_name": s["name"],
         "city": s["city"], "address": s["address"],
     }
+    if sid in SHOP_SITES:
+        out["site_url"] = f"{base}/site/{sid}/"  # وب‌سایت اختصاصی فروشنده
     if phone:
         out["phone"] = phone  # فیلد شماره — برخی پاسخ‌های واقعی این را حذف می‌کنند
     return out
+
+
+def seller_site_html(sid: str) -> bytes:
+    """وب‌سایت اختصاصی فروشنده — سبک مستقل (مثل یک سایت اینترنتی جدا)."""
+    s = SHOPS[sid]
+    site = SHOP_SITES[sid]
+    body = f"""<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<title>{s['name']} | فروشگاه اینترنتی</title></head>
+<body style="font-family:Tahoma; direction:rtl; max-width:700px; margin:30px auto; line-height:2">
+<h1>{s['name']}</h1>
+<p>فروشگاه اینترنتی رسمی — ارسال به سراسر کشور، ضمانت اصالت کالا.</p>
+<p><b>ساعات پاسخگویی:</b> شنبه تا پنجشنبه ۹ تا ۱۸</p>
+<p><b>تلفن سفارشات:</b> {site['extra_phone']}</p>
+<p><b>ایمیل:</b> {site['email']}</p>
+<hr>
+<p>© {s['name']} — {s['city']}</p>
+</body></html>"""
+    return body.encode()
 
 
 # ═══════════════════════════════ Router ═══════════════════════════════
@@ -302,7 +337,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(json.dumps(api_offers(qs.get("prk", [""])[0]), ensure_ascii=False).encode(),
                               "application/json")
         if path.startswith("/v4/shop/"):
-            payload = api_shop(qs.get("shop_id", qs.get("id", [""])[0])[0])
+            base = f"http://{self.headers.get('Host', '127.0.0.1')}"
+            payload = api_shop(qs.get("shop_id", qs.get("id", [""])[0])[0], base)
             if payload is None:
                 self.send_error(404)
                 return
@@ -318,6 +354,11 @@ class Handler(BaseHTTPRequestHandler):
             body = product_html(path.split("/p/", 1)[1].strip("/"))
         elif path.startswith("/shop/"):
             body = shop_html(path.split("/shop/", 1)[1].strip("/"))
+        elif path.startswith("/site/"):
+            sid = path.split("/site/", 1)[1].strip("/")
+            body = seller_site_html(sid) if sid in SHOP_SITES else page_html(
+                "پیدا نشد", "<main>سایت پیدا نشد</main>"
+            )
         else:
             self.send_error(404)
             return

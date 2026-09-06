@@ -41,6 +41,7 @@ class Lead:
     seller_name: Optional[str] = None
     phones: list[str] = field(default_factory=list)  # ملی: 09xxxxxxxxx / 021xxxxxxxx
     emails: list[str] = field(default_factory=list)
+    site: Optional[str] = None  # وب‌سایت اختصاصی فروشنده (اگر داشته باشد)
     description: Optional[str] = None  # قطعه‌ای کوتاه از توضیحات (اختیاری)
     quality_score: int = 0  # 0..100
     status: str = "new"  # new | updated | duplicate

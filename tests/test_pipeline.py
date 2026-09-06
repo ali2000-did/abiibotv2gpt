@@ -122,6 +122,43 @@ def test_delete_by_phone(tmp_path):
     assert store.stats()["total"] == 1
 
 
+# ---------- مهاجرت دیتابیس قدیمی (افزودن ستون site) ----------
+def test_db_migration_adds_site_column(tmp_path):
+    import sqlite3
+
+    from abii_bot.storage.db import _SCHEMA
+
+    db = tmp_path / "old.db"
+    old_schema = _SCHEMA.replace("    site          TEXT,\n", "")
+    conn = sqlite3.connect(db)
+    conn.executescript(old_schema)
+    conn.execute(
+        "INSERT INTO leads (source, source_id, url, phones, emails, status, first_seen, last_seen) "
+        "VALUES ('x','1','u','[]','[]','new','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = LeadStore(db)  # باید مهاجرت خودکار اجرا شود
+    lead = normalize_lead(_lead(source_id="2", phones=["09121112222"]))
+    lead.site = "https://seller.example.ir/"
+    store.upsert(lead)
+
+    got = store.get("x", "2")
+    assert got.site == "https://seller.example.ir/"
+    old = store.get("x", "1")  # رکورد قدیمی سالم مانده
+    assert old is not None and old.phones == []
+
+
+# ---------- سایت فروشنده در خروجی ----------
+def test_export_contains_site_column(tmp_path):
+    lead = normalize_lead(_lead(source_id="1", phones=["09121112222"]))
+    lead.site = "https://seller.example.ir/"
+    paths = export_leads([lead], tmp_path, ["csv"])
+    text = paths["csv"].read_text(encoding="utf-8-sig")
+    assert "سایت فروشنده" in text and "https://seller.example.ir/" in text
+
+
 # ---------- export ----------
 def test_export_csv_xlsx(tmp_path):
     leads = [normalize_lead(_lead(source_id=str(i), phones=[f"0912111222{i}"])) for i in range(3)]

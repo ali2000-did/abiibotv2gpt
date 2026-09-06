@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS leads (
     seller_name   TEXT,
     phones        TEXT,
     emails        TEXT,
+    site          TEXT,
     description   TEXT,
     quality_score INTEGER DEFAULT 0,
     status        TEXT DEFAULT 'new',
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 
 _COLS = (
     "source, source_id, url, title, category, city, district, price, seller_name, "
-    "phones, emails, description, quality_score, status, first_seen, last_seen"
+    "phones, emails, site, description, quality_score, status, first_seen, last_seen"
 )
 
 
@@ -55,6 +56,14 @@ class LeadStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """مهاجرت خودکار دیتابیس‌های قدیمی (مثل افزودن ستون site)."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(leads)")}
+        if "site" not in cols:
+            conn.execute("ALTER TABLE leads ADD COLUMN site TEXT")
 
     @contextmanager
     def _conn(self):
@@ -82,19 +91,21 @@ class LeadStore:
             conn.execute(
                 """
                 INSERT INTO leads ({cols})
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     url=excluded.url, title=excluded.title, category=excluded.category,
                     city=excluded.city, district=excluded.district, price=excluded.price,
                     seller_name=excluded.seller_name, phones=excluded.phones,
-                    emails=excluded.emails, description=excluded.description,
+                    emails=excluded.emails, site=excluded.site,
+                    description=excluded.description,
                     quality_score=excluded.quality_score, status=excluded.status,
                     last_seen=excluded.last_seen
                 """.format(cols=_COLS),
                 (
                     lead.source, lead.source_id, lead.url, lead.title, lead.category,
                     lead.city, lead.district, lead.price, lead.seller_name,
-                    phones, emails, lead.description, lead.quality_score, lead.status,
+                    phones, emails, lead.site, lead.description, lead.quality_score,
+                    lead.status,
                     lead.first_seen.isoformat(), lead.last_seen.isoformat(),
                 ),
             )
@@ -181,6 +192,7 @@ class LeadStore:
             district=row["district"], price=row["price"], seller_name=row["seller_name"],
             phones=json.loads(row["phones"] or "[]"),
             emails=json.loads(row["emails"] or "[]"),
+            site=row["site"],
             description=row["description"],
             quality_score=row["quality_score"] or 0, status=row["status"] or "new",
             first_seen=_parse_dt(row["first_seen"]), last_seen=_parse_dt(row["last_seen"]),

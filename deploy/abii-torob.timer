@@ -1,0 +1,13 @@
+# تایمر روزانه — هر روز ساعت ۴ صبح (ترافیک کم)
+# اجرای دستی فوری: sudo systemctl start abii-torob.service
+
+[Unit]
+Description=اجرای روزانه AbiiBot
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -125,6 +125,44 @@ def test_export_files_created(first_scan):
     assert "فروشگاه رایان تک" in csv_text and "09123456789" in csv_text
 
 
+def test_seller_site_enrichment(first_scan, mock_module):
+    """فروشنده‌هایی که سایت اختصاصی دارند → شماره/ایمیل از سایت خودشان هم می‌آید."""
+    outcome, _ = first_scan
+    site_leads = [
+        l for l in outcome.leads
+        if l.source_id.split(":")[1] in mock_module.SHOP_SITES
+    ]
+    assert len(site_leads) >= 2, "باید چند فروشگاه سایت‌دار اسکن شوند"
+    for lead in site_leads:
+        sid = lead.source_id.split(":")[1]
+        site = mock_module.SHOP_SITES[sid]
+        assert lead.site and lead.site.endswith(f"/site/{sid}/")
+        assert site["extra_phone"] in lead.phones, f"شماره سایت {sid} ادغام نشده"
+        assert site["email"] in lead.emails, f"ایمیل سایت {sid} ادغام نشده"
+    assert outcome.metrics.sites_enriched >= 2
+
+
+def test_walk_site_url_ignores_torob_pages():
+    from abii_bot.engine import walk_site_url
+
+    payload = {
+        "site_url": "https://example-seller.ir/",
+        "url": "https://torob.com/shop/shop-1/",  # صفحه ترب است — نباید گرفته شود
+    }
+    assert walk_site_url(payload) == "https://example-seller.ir/"
+    assert walk_site_url({"url": "https://torob.com/p/prk-1/"}) is None
+    assert walk_site_url({"data": {"website": "https://x.ir/contact"}}) == "https://x.ir/contact"
+
+
+def test_extract_contacts_from_html():
+    from abii_bot.engine import extract_contacts_from_html
+
+    html = """<html><body><h1>فروشگاه نمونه</h1>
+    <p>تماس: ۰۹۱۲ ۳۴۵ ۶۷۸۹ — info@shop.ir</p></body></html>"""
+    phones, emails = extract_contacts_from_html(html)
+    assert phones == ["09123456789"] and emails == ["info@shop.ir"]
+
+
 # ---------------- robustness: کلاینت و fallback ----------------
 def test_get_json_404_returns_none(mock_api, mock_module):
     """404 نباید retry بخورد و نباید استثنا بدهد — فقط None."""

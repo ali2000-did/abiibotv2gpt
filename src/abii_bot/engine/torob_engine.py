@@ -24,6 +24,7 @@ from ..config import AppConfig
 from ..extraction import extract_phones
 from ..models import Lead, utcnow
 from ..pipeline.cleaner import Deduper, commit_lead, normalize_lead
+from ..pipeline.quality import quality_score
 from ..platforms.base import dig, json_text, walk_phone_values
 from ..storage import LeadStore, export_leads
 from .http_async import AsyncPoliteClient, BlockedError, HttpMetrics
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 _SHOP_ID_KEYS = {"shop_id", "shopid", "seller_id", "store_id"}
 _SHOP_NAME_KEYS = {"shop_name", "seller_name", "store_name", "name", "title"}
 _CITY_KEYS = {"city", "city_name", "province", "town"}
+_SITE_KEYS = {"site", "website", "site_url", "shop_url", "web_site", "url"}
 
 
 # --------------------------------------------------------------------- helpers
@@ -95,8 +97,48 @@ def parse_shop_payload(payload: dict, shop_id: str, url: str) -> Lead:
     lead = Lead(
         source="torob", source_id=f"shop:{shop_id}", url=url,
         title=name, seller_name=name, city=city, phones=phones,
+        site=walk_site_url(payload),
     )
     return normalize_lead(lead)
+
+
+def walk_site_url(node) -> str | None:
+    """یافتن وب‌سایت اختصاصی فروشنده در JSON — URLهای داخلی خودِ ترب را نمی‌گیرد."""
+    from urllib.parse import urlparse
+
+    def rec(n):
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if k.lower() in _SITE_KEYS and isinstance(v, str) and v.startswith("http"):
+                    p = urlparse(v)
+                    if p.path.startswith(("/p/", "/shop/")):
+                        continue  # صفحه محصول/فروشگاه خود ترب است، نه سایت فروشنده
+                    return v
+            for v in n.values():
+                r = rec(v)
+                if r:
+                    return r
+        elif isinstance(n, list):
+            for item in n:
+                r = rec(item)
+                if r:
+                    return r
+        return None
+
+    return rec(node)
+
+
+def extract_contacts_from_html(html: str) -> tuple[list[str], list[str]]:
+    """استخراج شماره/ایمیل از HTML سایت فروشنده → (phones, emails)."""
+    from bs4 import BeautifulSoup
+
+    from ..extraction import extract_emails
+
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(" ", strip=True)
+    phones = [p.number for p in extract_phones(text)]
+    emails = extract_emails(text)
+    return phones, emails
 
 
 def parse_shop_html(html: str, shop_id: str, url: str) -> Lead:
@@ -155,6 +197,7 @@ class EngineMetrics:
     shops_skipped_fresh: int = 0  # به‌خاطر TTL رد شد
     shops_no_phone: int = 0
     shops_recovered_web: int = 0  # با fallback صفحه وب، شماره/API بازیابی شد
+    sites_enriched: int = 0       # از سایت اختصاصی فروشنده داده جدید گرفته شد
     phones_found: int = 0
     leads_new: int = 0
     leads_updated: int = 0
@@ -195,6 +238,7 @@ class TorobShopScanner:
         api_base: str | None = None,   # برای تست/ماک: http://127.0.0.1:8931
         always_offers: bool = False,   # همیشه offers هم خوانده شود (کشف فروشندههای بیشتر)
         web_fallback: bool = True,     # اگر API فروشگاه پاسخ نداد/شماره نداشت → صفحه وب HTML
+        follow_sites: bool = True,     # بازدید از وب‌سایت اختصاصی فروشنده (در صورت داشتن)
     ):
         self.cfg = cfg
         self.queries = queries
@@ -204,6 +248,7 @@ class TorobShopScanner:
         self.workers = workers or cfg.workers
         self.min_delay = min_delay
         self.web_fallback = web_fallback
+        self.follow_sites = follow_sites
         self.ttl = timedelta(hours=shop_ttl_hours if shop_ttl_hours is not None else cfg.shop_ttl_hours)
         self.always_offers = always_offers
         ep = cfg.endpoints
@@ -372,16 +417,17 @@ class TorobShopScanner:
                 if client.abort_requested:
                     logger.critical("قطع‌کننده مدار فعال — توقف برداشت (IP به‌نظر بلاک است)")
                     return
-                url = self._urls["shop"].format(shop_id=sid)
+                url_api = self._urls["shop"].format(shop_id=sid)
+                url_human = (self._urls.get("shop_web") or url_api).format(shop_id=sid)
                 lead: Lead | None = None
                 api_failed = False
                 try:
-                    payload = await client.get_json(url)
+                    payload = await client.get_json(url_api)
                     if payload is None:
                         api_failed = True  # 404/410 — endpoint فروشگاه در دسترس نیست
                     else:
                         lead = await loop.run_in_executor(
-                            None, parse_shop_payload, payload, sid, url
+                            None, parse_shop_payload, payload, sid, url_human
                         )
                 except (ConnectionError, BlockedError) as exc:
                     api_failed = True
@@ -403,6 +449,11 @@ class TorobShopScanner:
                             self.metrics.shops_recovered_web += 1
                 if lead is None:
                     continue
+                # وب‌سایت اختصاصی فروشنده: شماره/ایمیل بیشتر از خود سایتِ او
+                if self.follow_sites and lead.site:
+                    enriched = await self._enrich_from_site(client, lead)
+                    if enriched:
+                        self.metrics.sites_enriched += 1
                 self.metrics.shops_fetched += 1
                 if lead.phones:
                     self.metrics.phones_found += len(lead.phones)
@@ -411,10 +462,40 @@ class TorobShopScanner:
                 leads.append(lead)
 
         await asyncio.gather(*(worker() for _ in range(self.workers)))
-        logger.info("[harvest] %s فروشگاه برداشت شد (%s بدون شماره، %s بازیابی از وب)",
+        logger.info("[harvest] %s فروشگاه برداشت شد (%s بدون شماره، %s بازیابی از وب، %s غنی‌سازی از سایت فروشنده)",
                     self.metrics.shops_fetched, self.metrics.shops_no_phone,
-                    self.metrics.shops_recovered_web)
+                    self.metrics.shops_recovered_web, self.metrics.sites_enriched)
         return leads
+
+    async def _enrich_from_site(self, client: AsyncPoliteClient, lead: Lead) -> bool:
+        """بازدید از وب‌سایت اختصاصی فروشنده و ادغام شماره/ایمیل جدید.
+
+        فقط داده «جدید» اضافه می‌کند؛ چیزی حذف نمی‌شود. اگر سایت پاسخ نداد،
+        لید دست‌نخورده می‌ماند.
+        """
+        try:
+            html = await client.get_text(lead.site)
+        except (ConnectionError, BlockedError) as exc:
+            logger.debug("site %s failed: %s", lead.site, exc)
+            return False
+        if not html:
+            return False
+        loop = asyncio.get_running_loop()
+        phones, emails = await loop.run_in_executor(
+            None, extract_contacts_from_html, html
+        )
+        new_phones = [p for p in phones if p not in lead.phones]
+        new_emails = [e for e in emails if e not in lead.emails]
+        if not (new_phones or new_emails):
+            return False
+        mobiles = [p for p in (*lead.phones, *new_phones) if p.startswith("09")]
+        landlines = [p for p in (*lead.phones, *new_phones) if not p.startswith("09")]
+        lead.phones = list(dict.fromkeys(mobiles + landlines))
+        lead.emails = list(dict.fromkeys((*lead.emails, *new_emails)))
+        lead.quality_score = quality_score(lead)
+        logger.info("[site] %s → +%s شماره +%s ایمیل از سایت خودش",
+                    lead.seller_name, len(new_phones), len(new_emails))
+        return True
 
     async def _web_fallback(self, client: AsyncPoliteClient, shop_id: str) -> Lead | None:
         """دریافت صفحه HTML فروشگاه و استخراج شماره — وقتی API کافی نبود."""

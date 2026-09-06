@@ -20,6 +20,7 @@ PERSIAN_HEADERS = {
     "category": "دسته‌بندی",
     "price": "قیمت",
     "emails": "ایمیل",
+    "site": "سایت فروشنده",
     "url": "لینک",
     "description": "توضیحات",
     "quality_score": "امتیاز کیفیت",
@@ -40,6 +41,7 @@ def _lead_row(lead: Lead) -> dict:
         "category": d["category"] or "",
         "price": d["price"] or "",
         "emails": d["emails"],
+        "site": d["site"] or "",
         "url": d["url"],
         "description": d["description"] or "",
         "quality_score": d["quality_score"],
@@ -105,7 +107,7 @@ def _write_xlsx(rows: list[dict], path: Path) -> None:
 
     for r in rows:
         ws.append([r[c] for c in EXPORT_COLUMNS])
-    for col, width in zip(ws.columns, [10, 40, 18, 20, 12, 18, 16, 24, 46, 40, 12, 12, 20]):
+    for col, width in zip(ws.columns, [10, 40, 18, 20, 12, 18, 16, 24, 30, 46, 40, 12, 12, 20]):
         ws.column_dimensions[col[0].column_letter].width = width
 
     wb.save(path)

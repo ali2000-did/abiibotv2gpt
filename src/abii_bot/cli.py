@@ -256,6 +256,7 @@ def scan(
     shop_ttl: Optional[float] = typer.Option(None, "--shop-ttl", help="TTL فروشگاه تازه‌ی‌دیده‌شده (ساعت)"),
     always_offers: bool = typer.Option(False, "--always-offers", help="خواندن offers همه محصولات (کشف فروشنده بیشتر، کندتر)"),
     web_fallback: bool = typer.Option(True, "--web-fallback/--no-web-fallback", help="اگر API فروشگاه جواب نداد/شماره نداشت → صفحه وب HTML"),
+    follow_sites: bool = typer.Option(True, "--sites/--no-sites", help="بازدید از وب‌سایت اختصاصی فروشندگان (استخراج شماره/ایمیل بیشتر)"),
     base_url: Optional[str] = typer.Option(None, help="Override هاست API (تست/ماک، مثل http://127.0.0.1:8931)"),
     out: Optional[Path] = typer.Option(None, "--out", help="پوشه خروجی"),
     config: Optional[Path] = ERR,
@@ -275,14 +276,15 @@ def scan(
     outcome = run_torob_engine(
         queries, cfg, workers=workers, max_shops=max_shops, max_pages=max_pages,
         min_delay=min_delay, shop_ttl_hours=shop_ttl, api_base=base_url,
-        always_offers=always_offers, web_fallback=web_fallback,
+        always_offers=always_offers, web_fallback=web_fallback, follow_sites=follow_sites,
     )
 
     m = outcome.metrics
     console.print(Panel.fit(
         f"[bold]متریک موتور[/bold]\n"
         f"فروشگاه یکتا: {m.shops_found} | برداشت: {m.shops_fetched} | "
-        f"رد‌شده (تازه): {m.shops_skipped_fresh} | بازیابی از وب: {m.shops_recovered_web}\n"
+        f"رد‌شده (تازه): {m.shops_skipped_fresh} | بازیابی از وب: {m.shops_recovered_web} | "
+        f"غنی‌سازی از سایت فروشنده: {m.sites_enriched}\n"
         f"شماره پیدا شده: {m.phones_found} | بدون شماره: {m.shops_no_phone}\n"
         f"لید: new={m.leads_new} updated={m.leads_updated} duplicate={m.leads_duplicate}\n"
         f"مدت: {m.duration_sec}s | {m.http.snapshot()}",

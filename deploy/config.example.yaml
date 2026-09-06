@@ -1,0 +1,22 @@
+# نمونه تنظیمات اجرای واقعی — کپی کنید: cp deploy/config.example.yaml config.yaml
+# (config.yaml در .gitignore است و کامیت نمی‌شود — پروکسی‌ها را اینجا بگذارید)
+
+db_path: data/leads.db
+export_dir: exports
+export_formats: [csv, xlsx]
+workers: 4              # تعداد workerهای همزمان (۳ تا ۵ برای شروع)
+shop_ttl_hours: 168     # فروشگاه تازه‌ی‌دیده‌شده تا ۷ روز دوباره fetch نشود
+
+politeness:
+  min_delay: 1.2        # فاصله حداقلی درخواست‌ها به هر هاست (ثانیه)
+  max_retries: 3
+  timeout: 20
+
+# پروکسی (اختیاری — اگر IP شما بلاک شد):
+# proxies:
+#   - "http://user:pass@proxy1.example.ir:8080"
+#   - "http://user:pass@proxy2.example.ir:8080"
+
+# اگر ساختار endpointهای ترب تغییر کرد، فقط اینجا را به‌روز کنید:
+# endpoints:
+#   torob_search: "https://api.torob.com/v4/base-product/search/?q={query}&size=24&page={page}"

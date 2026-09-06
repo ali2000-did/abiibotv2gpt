@@ -1,0 +1,23 @@
+# زمان‌بندی اجرای روزانه AbiiBot (systemd) — فاز «قرار دادن روی سیستم»
+#
+# نصب:
+#   sudo cp deploy/abii-torob.service deploy/abii-torob.timer /etc/systemd/system/
+#   # مسیرها را در فایل service ویرایش کنید (WorkingDirectory و User)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now abii-torob.timer
+#
+# مشاهده: journalctl -u abii-torob.service -f
+
+[Unit]
+Description=AbiiBot — اسکن ترب (استخراج شماره فروشندگان)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# ⬇ مسیر ریپو و کاربر را مطابق سرور خودتان بگذارید
+User=ubuntu
+WorkingDirectory=/home/ubuntu/abiibotv2gpt
+ExecStart=/home/ubuntu/abiibotv2gpt/.venv/bin/abii torob scan --config config.yaml --pack digital --max-shops 100
+# مهلت: اگر بلاک شد و کند شد، بعد از ۲ ساعت رها کن
+TimeoutStartSec=2h
