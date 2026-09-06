@@ -27,10 +27,13 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 PHONE_RE = re.compile(r"0?9\d{9}|9\d{9}")
 
 STEPS = [
-    # (نام، الگوی URL — {q} و {prk} و {sid} جایگزین می‌شوند)
-    ("search_v4",      "https://api.torob.com/v4/base-product/search/?q={q}&size=24&page=1"),
-    ("search_v4_p2",   "https://api.torob.com/v4/base-product/search/?q={q}&size=24&page=2"),
-    ("detail_v2",      "https://api.torob.com/v4/base-product/detail-v2/?prk={prk}"),
+    # (نام، الگوی URL — {q} و {prk} و {sid} و {search_id} جایگزین می‌شوند)
+    # ⬇ الگوها از اسکرپرهای واقعی تأیید شده‌اند (Torob-Integration، torob-scraper)
+    ("search_v4",      "https://api.torob.com/v4/base-product/search/?q={q}&sort=popularity&size=24&page=0"),
+    ("search_v4_p2",   "https://api.torob.com/v4/base-product/search/?q={q}&sort=popularity&size=24&page=1"),
+    ("suggestion2",    "https://api.torob.com/suggestion2/?q={q}"),
+    ("details_full",   "https://api.torob.com/v4/base-product/details/?prk={prk}&search_id={search_id}"),
+    ("detail_v2",      "https://api.torob.com/v4/base-product/detail-v2/?prk={prk}"),  # نسخه قدیمی
     ("offers_a",       "https://api.torob.com/v4/base-product/offer-list/?prk={prk}&size=24"),
     ("offers_b",       "https://api.torob.com/v4/base-product/offers/?prk={prk}&size=24"),
     ("shop_api_a",     "https://api.torob.com/v4/shop/detail/?shop_id={sid}"),
@@ -73,16 +76,22 @@ def main() -> None:
     q = sys.argv[1] if len(sys.argv) > 1 else "لپ تاپ"
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = io.BytesIO()
-    prk, sid = None, None
+    prk, sid, search_id = None, None, None
     print(f"▶ probe_torob — query='{q}'\n")
 
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for name, template in STEPS:
             url = template
-            for placeholder, value in [("{q}", q), ("{prk}", prk or ""), ("{sid}", sid or "")]:
+            for placeholder, value in [
+                ("{q}", q), ("{prk}", prk or ""), ("{sid}", sid or ""),
+                ("{search_id}", search_id or ""),
+            ]:
                 url = url.replace(placeholder, value)
             if "{prk}" in template and not prk:
                 print(f"• {name}: skip (prk هنوز مشخص نیست)")
+                continue
+            if "{search_id}" in template and not search_id:
+                print(f"• {name}: skip (search_id هنوز مشخص نیست)")
                 continue
             if "{sid}" in template and not sid:
                 print(f"• {name}: skip (sid هنوز مشخص نیست)")
@@ -90,16 +99,24 @@ def main() -> None:
             status, text = fetch(url)
             ok = status == 200
             print(f"• {name}: HTTP {status} | {len(text)} chars | {url[:100]}")
-            z.writestr(f"{name}.{'json' if not name.endswith(('web','robots')) and ok else 'txt'}", text)
+            z.writestr(f"{name}.{'json' if not name.endswith(('web', 'robots')) and ok else 'txt'}", text)
             if not ok:
                 continue
-            if name == "search_v4":
+            if name.startswith("search_v4"):
                 print(f"    کلیدها: {keys_of(text)}")
+                has_next = '"next"' in text
+                print(f"    فیلد next (صفحه‌بندی سرورمحور): {'دارد' if has_next else 'ندارد'}")
                 m = re.search(r'"random_key"\s*:\s*"([^"]+)"', text)
                 if m:
                     prk = m.group(1)
-                print(f"    اولین prk: {prk}")
-            elif name in ("detail_v2", "offers_a", "offers_b"):
+                m2 = re.search(
+                    r'"more_info_url"\s*:\s*"[^"]*prk=([^&"]+)&search_id=([^&"]+)"', text
+                )
+                if m2:
+                    prk = prk or m2.group(1)
+                    search_id = m2.group(2)
+                print(f"    اولین prk: {prk} | search_id: {search_id}")
+            elif name in ("details_full", "detail_v2", "offers_a", "offers_b"):
                 print(f"    کلیدها: {keys_of(text)}")
                 if sid is None:
                     m = (re.search(r'"shop_id"\s*:\s*"?([\w-]+)"?', text)

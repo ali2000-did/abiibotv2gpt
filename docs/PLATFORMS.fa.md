@@ -139,7 +139,30 @@ abii torob scan --pack digital --max-shops 100 --workers 4 --min-delay 1.2
 5. اگر شماره فروشگاه در API نبود (مثل دکمه نمایش شماره): گذر مرورگری
    `abii browse` روی فروشگاه‌های «بدون شماره» فعال می‌شود
 
-### ۲.۷ نقشه تکمیلی
+## ۲.۸ API تأییدشده (از اسکرپرهای واقعی گیت‌هاب — 2026-09)
+
+از طریق جستجوی کد در ۱۵۶ ریپوی گیت‌هاب، endpointهای زیر از پروژه‌های **کارکردی**
+(`Torob-Integration` و `torob-scraper` و `Retrieve_Market`) استخراج و در کد
+پیش‌فرض شدند:
+
+| عمل | Endpoint | نکات |
+|---|---|---|
+| جستجو | `GET api.torob.com/v4/base-product/search/?q={q}&sort=popularity&size=24&page=0` | صفحه از **۰**؛ پاسخ شامل `next` (URL صفحه بعد — سرورمحور) |
+| جزئیات | `GET api.torob.com/v4/base-product/details/?prk={prk}&search_id={search_id}` | **search_id لازم است** — از `more_info_url` نتایج جستجو |
+| جزئیات قدیمی | `.../detail-v2/?prk=` | fallback |
+| پیشنهاد | `GET api.torob.com/suggestion2/?q=` | |
+| پیشنهاد ویژه | `GET api.torob.com/v4/special-offers/?page=` | |
+| نمودار قیمت | `GET .../price-chart/?prk=&search_id=` | |
+
+فیلدهای کلیدی نتایج جستجو: `random_key`, `name1/name2`, `price/price_text`,
+`web_client_absolute_url` (لینک محصول), `more_info_url` (منبع prk+search_id),
+`shop_text` (نام فروشنده). جزئیات محصول شامل `products_info.result[]` =
+فهرست فروشنده‌ها (shop_id/shop_name) — منبع اصلی نگاشت فروشگاه‌ها.
+
+⚠️ هنوز مبهم (فقط با probe روی سرور ایران): endpoint مشخصات/شماره فروشگاه و
+offer-list. `scripts/probe_torob.py` همین‌ها را می‌سنجد.
+
+### ۲.۹ نقشه تکمیلی
 ```
 browse(q) → محصولات → کارت فروشنده هر محصول → shop_id ها (یکتا)
          → صفحه shop → دکمه نمایش شماره → Lead

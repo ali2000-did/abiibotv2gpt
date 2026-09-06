@@ -43,9 +43,14 @@ class EndpointConfig:
     divar_search: str = "https://api.divar.ir/api/v1/post2/w/{city}/{category}"
     divar_detail: str = "https://api.divar.ir/post/v2/web/post/{token}"
     divar_web_fallback: str = "https://divar.ir/v/{token}"
-    torob_search: str = "https://api.torob.com/v4/base-product/search/?q={query}&size=24&page={page}"
-    torob_detail: str = "https://api.torob.com/v4/base-product/detail-v2/?prk={prk}"
+    # ⬇ تأییدشده از اسکرپرهای واقعی گیت‌هاب (Torob-Integration / torob-scraper):
+    #   - صفحه‌بندی از ۰ شروع می‌شود، sort=popularity، و پاسج شامل فیلد next است
+    #   - details به prk + search_id نیاز دارد (هر دو از more_info_url نتایج جستجو)
+    torob_search: str = "https://api.torob.com/v4/base-product/search/?q={query}&sort=popularity&size=24&page={page}"
+    torob_detail: str = "https://api.torob.com/v4/base-product/details/?prk={prk}&search_id={search_id}"
+    torob_detail_v2: str = "https://api.torob.com/v4/base-product/detail-v2/?prk={prk}"  # fallback قدیمی
     torob_offers: str = "https://api.torob.com/v4/base-product/offer-list/?prk={prk}&size=24"
+    torob_suggestion: str = "https://api.torob.com/suggestion2/?q={query}"
     torob_shop: str = "https://api.torob.com/v4/shop/detail/?shop_id={shop_id}"  # NEEDS LIVE VERIFICATION
     torob_shop_web: str = "https://torob.com/shop/{shop_id}/"
     torob_web_fallback: str = "https://torob.com/p/{prk}/"

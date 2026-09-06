@@ -255,10 +255,12 @@ class TorobShopScanner:
         self._urls = {
             "search": _rebase(ep.torob_search, api_base),
             "detail": _rebase(ep.torob_detail, api_base),
+            "detail_v2": _rebase(ep.torob_detail_v2, api_base),
             "offers": _rebase(ep.torob_offers, api_base),
             "shop": _rebase(ep.torob_shop, api_base),
             "shop_web": _rebase(ep.torob_shop_web, api_base),
         }
+        self._search_ids: dict[str, str] = {}  # prk → search_id (از more_info_url)
         self.metrics = EngineMetrics()
 
     # ------------------------------------------------------------------ run
@@ -304,6 +306,23 @@ class TorobShopScanner:
         return ScanOutcome(leads=leads, metrics=self.metrics, export_paths=export_paths)
 
     # ------------------------------------------------------------------ فاز ۱
+    @staticmethod
+    def _extract_prk(r: dict) -> tuple[str, str]:
+        """استخراج (prk, search_id) از یک نتیجه جستجو — مثل API واقعی ترب.
+
+        random_key مستقیم است؛ در غیر این صورت از more_info_url برش می‌خوریم.
+        """
+        prk = str(r.get("random_key") or r.get("prk") or "")
+        search_id = str(r.get("search_id") or "")
+        more = r.get("more_info_url") or ""
+        if (not prk or not search_id) and isinstance(more, str) and "prk=" in more:
+            from urllib.parse import parse_qs, urlparse
+
+            qs = parse_qs(urlparse(more).query)
+            prk = prk or str(qs.get("prk", [""])[0])
+            search_id = search_id or str(qs.get("search_id", [""])[0])
+        return prk, search_id
+
     async def _discover_products(self, client: AsyncPoliteClient) -> list[str]:
         prks: list[str] = []
         seen: set[str] = set()
@@ -312,36 +331,46 @@ class TorobShopScanner:
             if len(prks) >= product_cap:
                 break
             self.metrics.queries += 1
-            for page in range(1, self.max_pages + 1):
-                url = self._urls["search"].format(query=quote(q, safe=""), page=page)
+            # صفحه‌بندی واقعی ترب: از ۰ شروع + دنبال‌کردن فیلد next پاسخ
+            url: str | None = self._urls["search"].format(query=quote(q, safe=""), page=0)
+            pages_done = 0
+            while url and pages_done < self.max_pages and len(prks) < product_cap:
                 try:
                     data = await client.get_json(url)
                 except BlockedError:
                     raise
                 except ConnectionError as exc:
-                    logger.error("search failed q=%s page=%s: %s", q, page, exc)
+                    logger.error("search failed q=%s url=%s: %s", q, url[:90], exc)
                     break
                 if client.abort_requested:
                     logger.critical("قطع‌کننده مدار: بلاک‌های متوالی زیاد — توقف کشف")
                     return prks
                 if data is None:
-                    logger.warning("search q=%s page=%s → 404/410", q, page)
+                    logger.warning("search q=%s → 404/410: %s", q, url[:90])
                     break
                 self.metrics.pages_fetched += 1
                 results = data.get("results") or dig(data, "result.results") or []
-                batch = [
-                    str(r.get("random_key") or r.get("prk") or r.get("id") or "")
-                    for r in results
-                ]
-                fresh = [p for p in batch if p and p not in seen]
-                for p in fresh:
-                    seen.add(p)
+                fresh: list[str] = []
+                for r in results:
+                    prk, search_id = self._extract_prk(r)
+                    if not prk or prk in seen:
+                        continue
+                    seen.add(prk)
+                    if search_id:
+                        self._search_ids[prk] = search_id
+                    fresh.append(prk)
                 prks.extend(fresh)
-                logger.info("[discover] q='%s' page=%s → %s محصول (مجموع %s)", q, page, len(fresh), len(prks))
-                if not fresh:
-                    break
-                if len(prks) >= product_cap:
-                    break
+                logger.info("[discover] q='%s' صفحه %s → %s محصول (مجموع %s)",
+                            q, pages_done, len(fresh), len(prks))
+                pages_done += 1
+                # صفحه بعدی: اول از فیلد next خود سرور، وگرنه عدد صفحه
+                next_url = data.get("next")
+                if next_url:
+                    url = str(next_url)
+                elif fresh:
+                    url = self._urls["search"].format(query=quote(q, safe=""), page=pages_done)
+                else:
+                    url = None
         return prks
 
     # ------------------------------------------------------------------ فاز ۲
@@ -363,8 +392,14 @@ class TorobShopScanner:
                     return
                 self.metrics.products_seen += 1
                 found: dict[str, Optional[str]] = {}
+                # details واقعی ترب: prk + search_id (اگر نداریم → fallback نسخه v2)
+                sid = self._search_ids.get(prk, "")
+                detail_url = (
+                    self._urls["detail"].format(prk=prk, search_id=sid)
+                    if sid else self._urls["detail_v2"].format(prk=prk)
+                )
                 try:
-                    detail = await client.get_json(self._urls["detail"].format(prk=prk))
+                    detail = await client.get_json(detail_url)
                     if detail is not None:
                         found = walk_shop_ids(detail)
                 except (ConnectionError, BlockedError) as exc:
@@ -373,8 +408,8 @@ class TorobShopScanner:
                     try:
                         offers = await client.get_json(self._urls["offers"].format(prk=prk))
                         if offers is not None:
-                            for sid, name in walk_shop_ids(offers).items():
-                                found.setdefault(sid, name)
+                            for sid_, name in walk_shop_ids(offers).items():
+                                found.setdefault(sid_, name)
                     except (ConnectionError, BlockedError) as exc:
                         logger.debug("offers %s failed: %s", prk, exc)
                 for sid, name in found.items():

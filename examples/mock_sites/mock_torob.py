@@ -246,18 +246,34 @@ def shop_html(sid: str) -> bytes:
 
 
 # ═══════════════════════════════ API v4 ═══════════════════════════════
-def api_search(q: str, page: int, size: int) -> dict:
+def api_search(q: str, page: int, size: int, base: str = "") -> dict:
+    """شبیه پاسخ واقعی: results[] + next (صفحه‌بندی از ۰، مطلق)."""
     prks = match_prks(q)
-    start = (max(1, page) - 1) * size
+    page = max(0, page)
+    start = page * size
     batch = prks[start:start + size]
-    return {
-        "count": len(prks),
-        "results": [
-            {"random_key": prk, "name1": PRODUCTS[prk]["title"],
-             "price_text": PRODUCTS[prk]["price"]}
-            for prk in batch
-        ],
-    }
+    results = []
+    for prk in batch:
+        p = PRODUCTS[prk]
+        primary_shop = p["shops"][0] if p["shops"] else None
+        results.append({
+            "random_key": prk,
+            "name1": p["title"],
+            "price_text": p["price"],
+            "price": 12345,
+            "web_client_absolute_url": f"/p/{prk}/",
+            "more_info_url": f"{base}/v4/base-product/details/?prk={prk}&search_id=sid-{prk}",
+            "shop_text": SHOPS[primary_shop]["name"] if primary_shop else "",
+        })
+    next_url = None
+    if start + size < len(prks):
+        from urllib.parse import quote as _q
+
+        next_url = (
+            f"{base}/v4/base-product/search/?q={_q(q)}&sort=popularity"
+            f"&size={size}&page={page + 1}"
+        )
+    return {"count": len(prks), "results": results, "next": next_url}
 
 
 def api_detail(prk: str) -> dict:
@@ -265,6 +281,11 @@ def api_detail(prk: str) -> dict:
     if not p:
         return {"error": "not found"}
     primary = p["shops"][0] if p["shops"] else None
+    offers = [
+        {"shop_id": sid, "shop_name": SHOPS[sid]["name"],
+         "price_text": p["price"], "in_stock": True}
+        for sid in p["shops"]
+    ]
     return {
         "random_key": prk,
         "name1": p["title"],
@@ -272,6 +293,8 @@ def api_detail(prk: str) -> dict:
         "shop_id": primary,
         "shop": ({"id": primary, "name": SHOPS[primary]["name"],
                   "city": SHOPS[primary]["city"]} if primary else None),
+        # شکل واقعی: فروشنده‌ها داخل products_info
+        "products_info": {"count": len(offers), "result": offers},
     }
 
 
@@ -339,12 +362,13 @@ class Handler(BaseHTTPRequestHandler):
 
         # --- API v4 ---
         if path.startswith("/v4/base-product/search"):
-            q = qs.get("q", [""])[0]
-            page = int(qs.get("page", ["1"])[0] or 1)
+            base = f"http://{self.headers.get('Host', '127.0.0.1')}"
+            q = (qs.get("q") or qs.get("query") or [""])[0]
+            page = int(qs.get("page", ["0"])[0] or 0)
             size = int(qs.get("size", ["24"])[0] or 24)
-            return self._send(json.dumps(api_search(q, page, size), ensure_ascii=False).encode(),
+            return self._send(json.dumps(api_search(q, page, size, base), ensure_ascii=False).encode(),
                               "application/json")
-        if path.startswith("/v4/base-product/detail-v2"):
+        if path.startswith(("/v4/base-product/details", "/v4/base-product/detail-v2")):
             return self._send(json.dumps(api_detail(qs.get("prk", [""])[0]), ensure_ascii=False).encode(),
                               "application/json")
         if path.startswith("/v4/base-product/offer-list") or path.startswith("/v4/base-product/offers"):

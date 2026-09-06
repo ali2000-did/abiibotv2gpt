@@ -58,7 +58,9 @@ class TorobAdapter(PlatformAdapter):
 
     # ---------- fetch ----------
     def fetch_detail(self, ref: ListingRef) -> dict:
-        url = self.ep.torob_detail.format(prk=ref.source_id)
+        # endpoint رسمی details به search_id هم نیاز دارد؛ در حالت آداپتور قدیمی
+        # (بدون جستجوی قبلی) از نسخه v2 استفاده می‌کنیم که فقط prk می‌خواهد
+        url = self.ep.torob_detail_v2.format(prk=ref.source_id)
         res = self.fetcher.get(url)
         if not res.ok:
             raise ConnectionError(f"torob detail {ref.source_id}: HTTP {res.status_code}")
