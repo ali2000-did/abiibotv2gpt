@@ -28,3 +28,6 @@ configs/*.local.yaml
 .DS_Store
 .idea/
 .vscode/
+
+# لاگ اجرای پس‌زمینه (activate.sh)
+logs/
