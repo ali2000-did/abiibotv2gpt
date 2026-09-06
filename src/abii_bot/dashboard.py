@@ -18,6 +18,7 @@ import os
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+IS_WINDOWS = sys.platform == "win32"
 
 from .config import AppConfig
 from .models import Lead
@@ -70,7 +73,23 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess | None:
 
 
 def _pid_alive(pid: int) -> bool:
-    """زنده = فرایند واقعاً در حال اجرا (زامبی = مرده)."""
+    """زنده = فرایند واقعاً در حال اجرا (زامبی = مرده) — ویندوز و لینوکس."""
+    if IS_WINDOWS:
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return True
+        finally:
+            kernel32.CloseHandle(h)
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
         state = stat.rpartition(")")[2].split()[0]
@@ -97,16 +116,28 @@ def service_state() -> dict:
 
 
 def _abii_bin() -> str:
-    return str(Path(sys.executable).parent / "abii")
+    """مسیر اجرایی abii داخل venv — ویندوز: Scripts\\abii.exe، لینوکس: bin/abii."""
+    bin_dir = Path(sys.executable).parent
+    if IS_WINDOWS:
+        cand = bin_dir / "abii.exe"
+        return str(cand if cand.exists() else bin_dir.parent / "bin" / "abii")
+    return str(bin_dir / "abii")
 
 
 def _spawn_autorun() -> int:
-    """اجرای اتوران در پس‌زمینه (حالت nohup) — PID را برمی‌گرداند."""
+    """اجرای اتوران در پس‌زمینه — PID را برمی‌گرداند (ویندوز و لینوکس)."""
     Path("logs").mkdir(exist_ok=True)
     logf = open(LOG_FILE, "ab")  # noqa: SIM115
+    kwargs: dict = {}
+    if IS_WINDOWS:
+        kwargs["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        cmd = [_abii_bin(), "autorun"]
+    else:
+        kwargs["start_new_session"] = True
+        cmd = [_abii_bin(), "autorun"]
     proc = subprocess.Popen(
-        [_abii_bin(), "autorun"], stdout=logf, stderr=subprocess.STDOUT,
-        start_new_session=True, cwd=str(Path.cwd()),
+        cmd, stdout=logf, stderr=subprocess.STDOUT,
+        cwd=str(Path.cwd()), **kwargs,
     )
     PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     return proc.pid
@@ -151,11 +182,29 @@ def stop_bot() -> tuple[bool, str]:
         r = _run(["systemctl", "--user", "stop", SERVICE_NAME])
         if r and r.returncode == 0 and not service_state()["running"]:
             return True, "ربات متوقف شد (سرویس کاربر)"
-    # ۲) پس‌زمینه: SIGINT تمیز، بعد از ۱۰ ثانیه SIGTERM
+    # ۲) پس‌زمینه: سیگنال تمیز، بعد از مهلت، اکتما (ویندوز: taskkill)
     try:
         pid = int(PID_FILE.read_text().strip())
     except Exception:  # noqa: BLE001
         return False, "ربات در حال اجراست ولی PID پیدا نشد — از ترمینال: bash activate.sh --off"
+    if IS_WINDOWS:
+        try:
+            os.kill(pid, signal.CTRL_BREAK_EVENT)  # تلاش برای توقف تمیز
+        except Exception:  # noqa: BLE001
+            pass
+        for _ in range(10):
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.5)
+        if _pid_alive(pid):  # هنوز زنده → توقف قاطع
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],  # noqa: S603
+                           capture_output=True, timeout=15)
+            for _ in range(10):
+                if not _pid_alive(pid):
+                    break
+                time.sleep(0.5)
+        PID_FILE.unlink(missing_ok=True)
+        return True, "ربات متوقف شد"
     try:
         os.kill(pid, signal.SIGINT)
     except ProcessLookupError:

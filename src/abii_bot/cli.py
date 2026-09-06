@@ -233,6 +233,8 @@ def autorun(
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+    if hasattr(signal, "SIGBREAK"):  # ویندوز: Ctrl+Break / توقف از داشبورد
+        signal.signal(signal.SIGBREAK, _stop)
 
     cycles = run_forever(settings, cfg, once=once, stop=stop, settings_path=spath)
     console.print(f"[green]اتوران پس از {cycles} دور متوقف شد.[/green]")
