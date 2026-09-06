@@ -49,12 +49,18 @@ bash scripts/selftest.sh
 
 ## ۳. اولین اجرای واقعی (روی ترب)
 
+سریع‌ترین راه — **اتوران** (محصول از قبل در `configs/autorun.yaml` تنظیم شده):
 ```bash
-# محصول هدف شما — به‌جای «لپ تاپ» هر چیزی بگذارید:
-.venv/bin/abii torob scan --query "لپ تاپ" --max-shops 50
+# یک بار برای همیشه — بدون هیچ فرمان بعدی:
+sudo systemctl enable --now abii-autorun   # (بعد از کپی deploy/abii-autorun.service — بخش ۵)
+.venv/bin/abii status                      # دیدن آخرین دور
+```
 
-# یا بسته آماده حوزه دیجیتال (۱۰ جستجوی پرتقاضا):
-.venv/bin/abii torob scan --pack digital --max-shops 100
+اجرای دستی (اگر سرویس نمی‌خواهید):
+```bash
+.venv/bin/abii autorun                                          # دائمی: خودش هر روز دور می‌زند
+.venv/bin/abii set-product "گوشی موبایل" --every 6h             # تغییر محصول/دوره
+.venv/bin/abii torob scan --query "لپ تاپ" --max-shops 50       # یک اسکن واحد
 ```
 
 پایان کار، فایل‌ها را نشان می‌دهد:
@@ -81,21 +87,38 @@ nano config.yaml
 .venv/bin/abii torob scan --config config.yaml --pack digital
 ```
 
-## ۵. اجرای خودکار روزانه (روی سیستم بمانید و کار کند)
+## ۵. اتوران — بدون هیچ فرمانی، برای همیشه (روش پیشنهادی)
+
+محصول هدف **از قبل تنظیم شده** (فایل `configs/autorun.yaml` — فعلاً «مینی کولر
+شارژی»، روزانه). فقط سرویس دائمی را فعال کنید:
 
 ```bash
-sudo cp deploy/abii-torob.service deploy/abii-torob.timer /etc/systemd/system/
-sudo nano /etc/systemd/system/abii-torob.service   # مسیر و User را مطابق سرور خودتان
+sudo cp deploy/abii-autorun.service /etc/systemd/system/
+sudo nano /etc/systemd/system/abii-autorun.service   # فقط مسیر و User را تنظیم کنید
 sudo systemctl daemon-reload
-sudo systemctl enable --now abii-torob.timer        # هر روز ۴ صبح
-sudo systemctl start abii-torob.service             # اجرای فوری همین حالا
-journalctl -u abii-torob.service -f                 # دیدن لحظه‌به‌لحظه
+sudo systemctl enable --now abii-autorun
 ```
 
-(اگر systemd ندارید، همین خط را در crontab بگذارید:)
+تمام. از این به بعد:
+- هر روز خودش دور می‌زند، فروشگاه‌های **جدیدِ** محصول شما را می‌گیرد و اکسل
+  می‌سازد (فروشگاه تازه‌ی‌دیده‌شده دوباره دانلود نمی‌شود)
+- اگر دور بخاطر خطا خراب شود، ۱۰ دقیقه بعد خودش دوباره تلاش می‌کند
+- بعد از ری‌استارت سرور هم خودش بالا می‌آید (Restart=always)
+
+```bash
+journalctl -u abii-autorun -f        # دیدن لحظه‌به‌لحظه
+.venv/bin/abii status                # آخرین دور / دور بعدی / آمار
 ```
-0 4 * * * cd /home/ubuntu/abiibotv2gpt && .venv/bin/abii torob scan --config config.yaml --pack digital >> logs/cron.log 2>&1
+
+**تغییر محصول یا دوره** (بدون ری‌استارت — بین دورها خودش می‌خواند):
+```bash
+nano configs/autorun.yaml
+# یا:
+.venv/bin/abii set-product "محصول دیگر" --every 6h
 ```
+
+(اگر systemd ندارید: `.venv/bin/abii autorun` در یک ترمینال/با nohup باز بماند؛
+فایل‌های `abii-torob.timer` قدیمی‌تر هم هنوز برای اجرایِ لحظه‌ای زمان‌بندی‌شده موجودند.)
 
 ## ۶. مدیریت داده
 

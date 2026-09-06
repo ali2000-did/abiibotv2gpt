@@ -1,0 +1,11 @@
+queries:
+- مینی کولر شارژی
+every_seconds: 86400
+max_shops: 100
+workers: 4
+min_delay: 1.2
+shop_ttl_hours: 168.0
+export_formats:
+- csv
+- xlsx
+updated_at: '2026-09-06T06:59:42.671559+00:00'

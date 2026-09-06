@@ -168,6 +168,110 @@ def export(
 
 
 @app.command()
+def set_product(
+    product: List[str] = typer.Argument(..., help="محصول(ها) هدف — همان عبارت جستجو در ترب"),
+    every: str = typer.Option("24h", "--every", "-e", help="فاصله دورها: 24h / 6h / 30m / 45s"),
+    max_shops: int = typer.Option(100, "--max-shops", help="سقف فروشگاه جدید در هر دور"),
+    workers: int = typer.Option(4, "--workers", "-w"),
+    min_delay: float = typer.Option(1.2, "--min-delay"),
+    path: Optional[Path] = typer.Option(None, "--path", help="مسیر فایل تنظیمات (پیش‌فرض configs/autorun.yaml)"),
+):
+    """ثبت محصول هدف برای اتوران — بعد از این، خودش دور می‌زند."""
+    from .autorun import AutorunSettings, parse_interval
+
+    settings = AutorunSettings(
+        queries=[p.strip() for p in product if p.strip()],
+        every_seconds=parse_interval(every),
+        max_shops=max_shops, workers=workers, min_delay=min_delay,
+    )
+    saved = settings.save(path)
+    console.print(Panel.fit(
+        f"[bold green]محصول هدف ثبت شد ✅[/bold green]\n"
+        f"محصول(ها): {'، '.join(settings.queries)}\n"
+        f"دوره تکرار: هر {every} ({settings.every_seconds:,} ثانیه)\n"
+        f"سقف هر دور: {settings.max_shops} فروشگاه جدید\n"
+        f"فایل: {saved}",
+        title="autorun",
+    ))
+    console.print(
+        "[cyan]اجرا:[/cyan] sudo systemctl enable --now abii-autorun"
+        "  (یا بدون سرویس: .venv/bin/abii autorun)"
+    )
+
+
+@app.command()
+def autorun(
+    once: bool = typer.Option(False, "--once", help="فقط یک دور اجرا و خروج (تست)"),
+    settings_file: Optional[Path] = typer.Option(None, "--settings", help="فایل تنظیمات"),
+    config: Optional[Path] = ERR,
+):
+    """اجرای دائمی: دور‌بهدور اسکن می‌کند و روشن می‌ماند (Ctrl+C تمیز قطع می‌کند)."""
+    import signal
+    import threading
+
+    from .autorun import AutorunSettings, default_settings_path, run_forever
+
+    setup_logging(True)
+    cfg = _cfg(config)
+    spath = settings_file or default_settings_path()
+    try:
+        settings = AutorunSettings.load(spath)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+
+    stop = threading.Event()
+
+    def _stop(signum, frame):  # noqa: ARG001
+        console.print("\n[yellow]دریافت سیگنال توقف — بعد از اتمام کار جاری تمیز قطع می‌شود…[/yellow]")
+        stop.set()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    cycles = run_forever(settings, cfg, once=once, stop=stop, settings_path=spath)
+    console.print(f"[green]اتوران پس از {cycles} دور متوقف شد.[/green]")
+
+
+@app.command()
+def status(
+    db: Optional[Path] = typer.Option(None, "--db"),
+    config: Optional[Path] = ERR,
+):
+    """وضعیت اتوران (آخرین دور، دور بعدی) + آمار دیتابیس."""
+    import json as _json
+
+    cfg = _cfg(config)
+    from .autorun import status_path
+
+    st = status_path(cfg)
+    if st.exists():
+        data = _json.loads(st.read_text(encoding="utf-8"))
+        table = Table(title=f"اتوران — دور {data.get('cycle', '?')}")
+        for col in ["آخرین اجرا", "دور بعدی", "فروشگاه جدید", "شماره", "خطا"]:
+            table.add_column(col, overflow="fold")
+        table.add_row(
+            (data.get("last_run_at") or "")[:19],
+            (data.get("next_run_at") or "—")[:19],
+            str(data.get("leads_new", "—")),
+            str(data.get("phones_found", "—")),
+            (data.get("error") or "—")[:60],
+        )
+        console.print(table)
+        for p in data.get("exports", []):
+            console.print(f"[cyan]آخرین خروجی:[/cyan] {p}")
+    else:
+        console.print("[yellow]اتوران هنوز اجرا نشده است.[/yellow]")
+
+    store = LeadStore(db or cfg.db_path)
+    s = store.stats()
+    console.print(
+        f"[green]دیتابیس:[/green] {s['total']} لید | {s['with_phone']} دارای شماره | "
+        f"({', '.join(f'{k}: {v}' for k, v in s['by_source'].items()) or 'خالی'})"
+    )
+
+
+@app.command()
 def platforms():
     """فهرست پلتفرم‌های پشتیبانی‌شده."""
     console.print("[green]" + "، ".join(supported_platforms()) + "[/green]")

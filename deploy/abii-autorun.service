@@ -1,0 +1,32 @@
+# سرویس دائمی اتوران AbiiBot — روشن می‌ماند و خودش هر روز دور می‌زند
+#
+# نصب (یک بار):
+#   sudo cp deploy/abii-autorun.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/abii-autorun.service   # مسیر و User را تنظیم کنید
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now abii-autorun
+#
+# بعد از این هیچ فرمانی لازم نیست — حتی بعد از ری‌استارت سرور خودش بالا می‌آید.
+# مشاهده لحظه‌به‌لحظه:  journalctl -u abii-autorun -f
+# تغییر محصول:        nano configs/autorun.yaml   (یا abii set-product "...")
+#                     سرویس بین دورها خودش تغییر را می‌خواند؛ ری‌استارت لازم نیست.
+
+[Unit]
+Description=AbiiBot اتوران — اسکن خودکار ترب برای محصول تنظیم‌شده
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ⬇ مسیر ریپو و کاربر را مطابق سرور خودتان بگذارید
+User=ubuntu
+WorkingDirectory=/home/ubuntu/abiibotv2gpt
+ExecStart=/home/ubuntu/abiibotv2gpt/.venv/bin/abii autorun
+Restart=always
+RestartSec=30
+# خواب دورها قطع‌شدنی است؛ SIGTERM تمیز قطع می‌کند
+KillSignal=SIGINT
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
