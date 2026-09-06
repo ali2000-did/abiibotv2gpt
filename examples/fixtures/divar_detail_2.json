@@ -1,0 +1,20 @@
+{
+  "sections": [
+    {
+      "widget_type": "HEADER",
+      "data": { "title": "فروش واحد ۱۲۰ متری تجریش" }
+    },
+    {
+      "widget_type": "DESCRIPTION_ROW",
+      "data": {
+        "text": "ویو باز، طبقه چهارم، دو پارکینگ. بازدید با هماهنگی قبلی — تلفن دفتر: ۰۲۱-۲۲۳۳۴۴۵۵"
+      }
+    }
+  ],
+  "post": {
+    "token": "gQ7kL2pA",
+    "categories": ["املاک", "خرید و فروش", "خرید آپارتمان"],
+    "city": { "slug": "tehran", "name": "تهران" }
+  },
+  "price": { "mode": "NORMAL", "value": 12500000000 }
+}

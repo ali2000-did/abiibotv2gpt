@@ -1,0 +1,19 @@
+{
+  "result": {
+    "posts": [
+      {
+        "token": "wZJmF8xu",
+        "data": { "title": "آپارتمان ۸۵ متری، خیابان ولیعصر" }
+      },
+      {
+        "token": "gQ7kL2pA",
+        "data": { "title": "فروش واحد ۱۲۰ متری تجریش" }
+      },
+      {
+        "token": "mNb3vRt9",
+        "data": { "title": "آپارتمان ۶۰ متری نوساز" }
+      }
+    ],
+    "pagination": { "has_next_page": false }
+  }
+}

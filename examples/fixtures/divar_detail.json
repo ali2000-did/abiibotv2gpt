@@ -1,0 +1,35 @@
+{
+  "sections": [
+    {
+      "widget_type": "HEADER",
+      "data": { "title": "آپارتمان ۸۵ متری، خیابان ولیعصر" }
+    },
+    {
+      "widget_type": "GROUP_FEATURE",
+      "data": {
+        "items": [
+          { "title": "متراژ", "value": "۸۵" },
+          { "title": "ساخت", "value": "۱۴۰۰" },
+          { "title": "اتاق", "value": "۲" }
+        ]
+      }
+    },
+    {
+      "widget_type": "DESCRIPTION_ROW",
+      "data": {
+        "text": "آپارتمان نوساز با آسانسور و پارکینگ. برای هماهنگی بازدید تماس بگیرید: ۰۹۱۲ ۳۴۵ ۶۷۸۹"
+      }
+    },
+    {
+      "widget_type": "CONTACT",
+      "data": { "phone": "09123456789", "chat": true }
+    }
+  ],
+  "seo": { "title": "آپارتمان ۸۵ متری | دیوار تهران" },
+  "post": {
+    "token": "wZJmF8xu",
+    "categories": ["املاک", "خرید و فروش", "خرید آپارتمان"],
+    "city": { "slug": "tehran", "name": "تهران" }
+  },
+  "price": { "mode": "NORMAL", "value": 8500000000 }
+}

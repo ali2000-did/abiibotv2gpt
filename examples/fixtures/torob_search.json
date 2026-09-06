@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "random_key": "prk-laptop-asus-001",
+      "name1": "لپ تاپ ۱۵ اینچی ایسوس",
+      "price_text": "۴۵٬۵۰۰٬۰۰۰ تومان"
+    },
+    {
+      "random_key": "prk-laptop-lenovo-002",
+      "name1": "لپ تاپ لنوو مدل IdeaPad",
+      "price_text": "۳۸٬۰۰۰٬۰۰۰ تومان"
+    }
+  ],
+  "count": 2
+}

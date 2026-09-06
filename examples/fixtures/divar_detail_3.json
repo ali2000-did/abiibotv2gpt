@@ -1,0 +1,20 @@
+{
+  "sections": [
+    {
+      "widget_type": "HEADER",
+      "data": { "title": "آپارتمان ۶۰ متری نوساز" }
+    },
+    {
+      "widget_type": "DESCRIPTION_ROW",
+      "data": {
+        "text": "نوساز با آسانسور. لطفاً فقط از طریق چت دیوار پیام دهید؛ شماره تماسی درج نشده است."
+      }
+    }
+  ],
+  "post": {
+    "token": "mNb3vRt9",
+    "categories": ["املاک", "خرید و فروش", "خرید آپارتمان"],
+    "city": { "slug": "tehran", "name": "تهران" }
+  },
+  "price": { "mode": "NORMAL", "value": 4200000000 }
+}
