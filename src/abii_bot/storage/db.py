@@ -104,6 +104,60 @@ class LeadStore:
             rows = conn.execute(f"SELECT {_COLS} FROM leads ORDER BY quality_score DESC").fetchall()
         return [self._row_to_lead(r) for r in rows]
 
+    def touch(self, source: str, source_id: str) -> None:
+        """به‌روزرسانی last_seen بدون بازنویسی داده — برای رکوردهای duplicate."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE leads SET last_seen=? WHERE source=? AND source_id=?",
+                (utcnow().isoformat(), source, source_id),
+            )
+
+    # ---------- حق حذف (Data Privacy) ----------
+    def delete(self, source: str, source_id: str) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM leads WHERE source=? AND source_id=?", (source, source_id)
+            )
+            return cur.rowcount > 0
+
+    def delete_by_phone(self, phone: str) -> int:
+        """حذف همه رکوردهایی که این شماره را دارند (JSON array در ستون phones)."""
+        import json as _json
+
+        with self._conn() as conn:
+            rows = conn.execute("SELECT source, source_id, phones FROM leads").fetchall()
+            victims = [
+                (r["source"], r["source_id"])
+                for r in rows
+                if phone in _json.loads(r["phones"] or "[]")
+            ]
+            conn.executemany(
+                "DELETE FROM leads WHERE source=? AND source_id=?", victims
+            )
+        return len(victims)
+
+    def stats(self) -> dict:
+        with self._conn() as conn:
+            total = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
+            by_source = dict(
+                conn.execute("SELECT source, COUNT(*) c FROM leads GROUP BY source").fetchall()
+            )
+            runs = conn.execute("SELECT COUNT(*) c FROM scan_runs").fetchone()["c"]
+        with_phone = sum(1 for l in self.all_leads() if l.phones)
+        return {
+            "total": total,
+            "with_phone": with_phone,
+            "by_source": by_source,
+            "runs": runs,
+        }
+
+    def recent_runs(self, limit: int = 5) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def record_run(self, spec: dict, counts: dict, started_at: datetime) -> None:
         with self._conn() as conn:
             conn.execute(

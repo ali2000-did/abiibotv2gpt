@@ -47,6 +47,8 @@ class HttpMetrics:
 class AsyncPoliteClient:
     """یک نمونه بین همه workerها به اشتراک می‌رود؛ نرخ per-host تضمین می‌شود."""
 
+    ABORT_AFTER_CONSEC_BLOCKS = 15  # قطع‌کننده مدار: پس از این تعدال بلاک متوالی، اسکن متوقف شود
+
     def __init__(self, cfg: AppConfig, min_delay: float | None = None):
         self._ua_pool = cfg.user_agents or ["abii-bot/0.1"]
         self._ua_i = 0
@@ -54,16 +56,33 @@ class AsyncPoliteClient:
         self._jitter_cap = min(cfg.politeness.jitter, max(self._min_delay * 0.5, 0.05))
         self._max_retries = cfg.politeness.max_retries
         self._backoff_base = cfg.politeness.backoff_base
-        self._client = httpx.AsyncClient(
-            timeout=cfg.politeness.timeout,
-            follow_redirects=True,
-            headers={"Accept-Language": "fa,en;q=0.8"},
-            proxy=(cfg.proxies[0] if cfg.proxies else None),
-        )
+        # چرخش پروکسی: به ازای هر پروکسی یک client (بدون پروکسی هم یکی)
+        proxies = cfg.proxies or [None]
+        self._clients = [
+            httpx.AsyncClient(
+                timeout=cfg.politeness.timeout,
+                follow_redirects=True,
+                headers={"Accept-Language": "fa,en;q=0.8"},
+                proxy=p,
+            )
+            for p in proxies
+        ]
+        self._client_i = 0
         self._host_next: dict[str, float] = {}
         self._host_locks: dict[str, asyncio.Lock] = {}
         self._slowdown = 1.0  # ضریب کندسازی تطبیقی (1.0 = سرعت عادی)
+        self._consec_blocks = 0
         self.metrics = HttpMetrics()
+
+    @property
+    def abort_requested(self) -> bool:
+        """قطع‌کننده مدار: بلاک‌های متوالی نشان می‌دهد IP سوخته — ادامه بی‌فایده و بی‌احترام است."""
+        return self._consec_blocks >= self.ABORT_AFTER_CONSEC_BLOCKS
+
+    def _client(self) -> httpx.AsyncClient:
+        c = self._clients[self._client_i % len(self._clients)]
+        self._client_i += 1
+        return c
 
     # ---------- نرخ per-host ----------
     async def _wait_turn(self, url: str) -> None:
@@ -83,22 +102,32 @@ class AsyncPoliteClient:
         return ua
 
     # ---------- API ----------
-    async def get_json(self, url: str) -> dict:
+    async def get_json(self, url: str) -> dict | None:
+        """GET و parse JSON.
+
+        • 404/410 → None بدون retry (منبع واقعاً موجود نیست — retry بی‌احترامی بی‌مورد است)
+        • پاسخ 200 غیر-JSON → ConnectionError (بدون قتل کل اسکن توسط استثنای خام)
+        """
         last_exc: Exception | None = None
         for attempt in range(1, self._max_retries + 1):
             await self._wait_turn(url)
             self.metrics.requests += 1
             try:
-                resp = await self._client.get(url, headers={"User-Agent": self._next_ua()})
+                resp = await self._client().get(url, headers={"User-Agent": self._next_ua()})
                 self.metrics.by_status[resp.status_code] = (
                     self.metrics.by_status.get(resp.status_code, 0) + 1
                 )
                 if resp.status_code in (401, 403):
                     self.metrics.blocked += 1
+                    self._consec_blocks += 1
                     self._slowdown = min(self._slowdown * 1.5, 10.0)
                     raise BlockedError(f"HTTP {resp.status_code} برای {url}")
+                if resp.status_code in (404, 410):
+                    logger.debug("منبع موجود نیست (HTTP %s): %s", resp.status_code, url)
+                    return None
                 if resp.status_code == 429 or resp.status_code >= 500:
                     self.metrics.blocked += 1
+                    self._consec_blocks += 1
                     self._slowdown = min(self._slowdown * 1.5, 10.0)
                     retry_after = float(resp.headers.get("Retry-After", 0) or 0)
                     wait = retry_after or self._backoff_base**attempt + random.uniform(0, 1)
@@ -108,11 +137,25 @@ class AsyncPoliteClient:
                     last_exc = RuntimeError(f"HTTP {resp.status_code}")
                     continue
                 resp.raise_for_status()
+                try:
+                    data = resp.json()
+                except ValueError as exc:  # پاسخ 200 اما غیر JSON (مثلاً HTML خطا)
+                    self.metrics.errors += 1
+                    raise ConnectionError(
+                        f"پاسخ 200 اما JSON نیست: {url} ({str(exc)[:80]})"
+                    ) from exc
                 # موفقیت → کندسازی آرام به حالت عادی برمی‌گردد
+                self._consec_blocks = 0
                 self._slowdown = max(1.0, self._slowdown * 0.97)
-                return resp.json()
+                return data
             except BlockedError:
-                raise
+                if self.abort_requested:
+                    raise  # در سطح موتور هندل می‌شود (توقف کل اسکن)
+                if attempt >= self._max_retries:
+                    self.metrics.errors += 1
+                    raise
+                await asyncio.sleep(1.0)
+                continue
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 last_exc = exc
                 self.metrics.retries += 1
@@ -123,5 +166,50 @@ class AsyncPoliteClient:
         self.metrics.errors += 1
         raise ConnectionError(f"شکست پس از {self._max_retries} تلاش: {url} ({last_exc})")
 
+    async def get_text(self, url: str) -> str | None:
+        """GET متنی (HTML) — همان منطق get_json بدون parse JSON."""
+        last_exc: Exception | None = None
+        for attempt in range(1, self._max_retries + 1):
+            await self._wait_turn(url)
+            self.metrics.requests += 1
+            try:
+                resp = await self._client().get(url, headers={"User-Agent": self._next_ua()})
+                self.metrics.by_status[resp.status_code] = (
+                    self.metrics.by_status.get(resp.status_code, 0) + 1
+                )
+                if resp.status_code in (401, 403):
+                    self.metrics.blocked += 1
+                    self._consec_blocks += 1
+                    raise BlockedError(f"HTTP {resp.status_code} برای {url}")
+                if resp.status_code in (404, 410):
+                    return None
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    self.metrics.blocked += 1
+                    self._consec_blocks += 1
+                    retry_after = float(resp.headers.get("Retry-After", 0) or 0)
+                    wait = retry_after or self._backoff_base**attempt + random.uniform(0, 1)
+                    await asyncio.sleep(wait)
+                    last_exc = RuntimeError(f"HTTP {resp.status_code}")
+                    continue
+                resp.raise_for_status()
+                self._consec_blocks = 0
+                self._slowdown = max(1.0, self._slowdown * 0.97)
+                return resp.text
+            except BlockedError:
+                if self.abort_requested:
+                    raise
+                if attempt >= self._max_retries:
+                    self.metrics.errors += 1
+                    raise
+                await asyncio.sleep(1.0)
+                continue
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                last_exc = exc
+                self.metrics.retries += 1
+                await asyncio.sleep(self._backoff_base**attempt + random.uniform(0, 1))
+        self.metrics.errors += 1
+        raise ConnectionError(f"شکست پس از {self._max_retries} تلاش: {url} ({last_exc})")
+
     async def aclose(self) -> None:
-        await self._client.aclose()
+        for c in self._clients:
+            await c.aclose()

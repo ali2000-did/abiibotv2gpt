@@ -16,7 +16,7 @@ from .config import AppConfig
 from .crawler.base import Fetcher
 from .local import LocalFixtureFetcher
 from .models import Lead, utcnow
-from .pipeline.cleaner import Deduper, normalize_lead
+from .pipeline.cleaner import Deduper, commit_lead, normalize_lead
 from .pipeline.quality import dataset_report
 from .platforms import ScanSpec, build_adapter
 from .storage import LeadStore, export_leads
@@ -71,8 +71,7 @@ def run_scan(
             try:
                 payload = adapter.fetch_detail(ref)
                 lead = normalize_lead(adapter.parse_detail(payload, ref))
-                lead.status = deduper.classify(lead)
-                store.upsert(lead)
+                commit_lead(lead, store, deduper)
                 counts[lead.status] = counts.get(lead.status, 0) + 1
                 leads.append(lead)
                 logger.info("[%s/%s] %s", i + 1, spec.max_items or "∞", lead)

@@ -26,6 +26,42 @@ def normalize_lead(lead: Lead) -> Lead:
     return lead
 
 
+def reconcile(prev: Lead, cur: Lead) -> Lead:
+    """ادغام رکورد قبلی و جدید — داده‌ها فقط کامل‌تر می‌شوند، هرگز ضعیف‌تر نمی‌شوند.
+
+    شماره‌ها اجتماع می‌شوند (موبایل اول)؛ فیلدهای خالیِ جدید از قبلی پر می‌شوند.
+    """
+    mobiles = [p for p in (*cur.phones, *prev.phones) if p.startswith("09")]
+    landlines = [p for p in (*cur.phones, *prev.phones) if not p.startswith("09")]
+    cur.phones = list(dict.fromkeys(mobiles + landlines))
+    cur.emails = list(dict.fromkeys((*cur.emails, *prev.emails)))
+    for field in ("title", "category", "city", "district", "price",
+                  "seller_name", "description"):
+        if not getattr(cur, field) and getattr(prev, field):
+            setattr(cur, field, getattr(prev, field))
+    return normalize_lead(cur)
+
+
+def commit_lead(lead: Lead, store, deduper: "Deduper") -> str:
+    """تعیین وضعیت + ذخیره امن یک لید (جلوگیری از بازنویسی داده قوی با ضعیف).
+
+    duplicate → فقط touch (last_seen)؛ updated → ادغام با رکورد قبلی؛ new → درج.
+    وضعیت نهایی را برمی‌گرداند.
+    """
+    status = deduper.classify(lead)
+    lead.status = status
+    if status == "duplicate":
+        store.touch(lead.source, lead.source_id)
+    else:
+        if status == "updated":
+            prev = store.get(lead.source, lead.source_id)
+            if prev is not None:
+                lead = reconcile(prev, lead)
+                lead.status = "updated"
+        store.upsert(lead)
+    return status
+
+
 class Deduper:
     """وضعیت هر Lead را نسبت به دیتابیس تعیین می‌کند.
 

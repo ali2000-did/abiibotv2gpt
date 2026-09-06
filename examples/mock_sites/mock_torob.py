@@ -57,10 +57,21 @@ for i in range(5, 45):
         "phone": phone,
     }
 
-# فروشگاه‌هایی که شماره‌شان فقط با دکمه «نمایش شماره» در دسترس است (API حذف می‌کند)
+# فروشگاه‌هایی که شماره‌شان فقط با دکمه «نمایش شماره» در دسترس است:
+# در API حذف می‌شوند و در HTML به‌صورت JS-inject هستند (در سورس خام نیستند!)
 PHONE_BEHIND_BUTTON = {f"shop-{i}" for i in range(8, 45, 4)} & {
     s for s, d in SHOPS.items() if d["phone"]
 }
+
+# فروشگاه‌هایی که endpoint_APIشان (مثل دنیای واقعی) پاسخ 404 می‌دهد
+# → موتور باید با fallback صفحه وب، شماره را بازیابی کند
+API_BROKEN_SHOPS: list[str] = []
+for _sid in sorted(SHOPS, key=lambda s: int(s.split("-")[1])):
+    _n = int(_sid.split("-")[1])
+    if _n >= 5 and SHOPS[_sid]["phone"] and _sid not in PHONE_BEHIND_BUTTON:
+        API_BROKEN_SHOPS.append(_sid)
+        if len(API_BROKEN_SHOPS) == 3:
+            break
 
 TITLE_WORDS = ["لپ تاپ", "گوشی موبایل", "تبلت", "هدفون", "پاور بانک", "هارد اکسترنال",
                "قطعات کامپیوتر", "ساعت هوشمند", "مانیتور", "کیف و کاور گوشی"]
@@ -180,14 +191,25 @@ def shop_html(sid: str) -> bytes:
     s = SHOPS.get(sid)
     if not s:
         return page_html("پیدا نشد", "<main>فروشگاه یافت نشد</main>")
-    if s["phone"]:
+    if not s["phone"]:
+        phone_html = "<p><b>تماس:</b> فقط از طریق پیام دایرکت ترب</p>"
+    elif sid in PHONE_BEHIND_BUTTON:
+        # شماره در سورس خام HTML نیست — فقط با کلیک، از data-attribute تزریق می‌شود
+        # (شبیه واقعی: فقط گذر مرورگری می‌تواند آن را بگیرد)
+        phone_html = f"""
+<p><b>شماره تماس:</b>
+  <button class="show-phone" data-num="{s['phone']}"
+          onclick="document.getElementById('ph').textContent=this.dataset.num;
+                   document.getElementById('ph').style.display='inline'">نمایش شماره</button>
+  <span id="ph" style="display:none; font-size:17px"></span>
+</p>"""
+    else:
+        # شماره در HTML هست (پنهان با CSS) — fallback صفحات وبِ HTTP آن را می‌گیرد
         phone_html = f"""
 <p><b>شماره تماس:</b>
   <button onclick="document.getElementById('ph').style.display='inline'">نمایش شماره</button>
   <span id="ph" style="display:none; font-size:17px">{s['phone']}</span>
 </p>"""
-    else:
-        phone_html = "<p><b>تماس:</b> فقط از طریق پیام دایرکت ترب</p>"
     return page_html(s["name"], f"""
 {_header()}
 <main><h1>{s['name']}</h1><p><b>شهر:</b> {s['city']}</p>
@@ -236,10 +258,11 @@ def api_offers(prk: str) -> dict:
     return {"result": {"offer_list": offers, "count": len(offers)}}
 
 
-def api_shop(sid: str) -> dict:
+def api_shop(sid: str):
+    """پاسخ API فروشگاه — None یعنی HTTP 404 (فروشگاه API-شان خراب است)."""
     s = SHOPS.get(sid)
-    if not s:
-        return {"error": "not found"}
+    if not s or sid in API_BROKEN_SHOPS:
+        return None
     phone = s["phone"] if sid not in PHONE_BEHIND_BUTTON else None
     out = {
         "shop_id": sid, "id": sid,
@@ -279,8 +302,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(json.dumps(api_offers(qs.get("prk", [""])[0]), ensure_ascii=False).encode(),
                               "application/json")
         if path.startswith("/v4/shop/"):
-            return self._send(json.dumps(api_shop(qs.get("shop_id", qs.get("id", [""])[0])[0]),
-                                         ensure_ascii=False).encode(), "application/json")
+            payload = api_shop(qs.get("shop_id", qs.get("id", [""])[0])[0])
+            if payload is None:
+                self.send_error(404)
+                return
+            return self._send(json.dumps(payload, ensure_ascii=False).encode(),
+                              "application/json")
 
         # --- HTML ---
         if path in ("", "/"):

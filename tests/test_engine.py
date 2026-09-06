@@ -1,26 +1,39 @@
 """تست‌های موتور ناهمگام ترب — روی سرور ماک API v4."""
 import threading
-import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from abii_bot.config import AppConfig
-from abii_bot.engine import parse_shop_payload, run_torob_engine, walk_shop_ids
+from abii_bot.engine import TorobShopScanner, parse_shop_payload, run_torob_engine, walk_shop_ids
+from abii_bot.extraction import extract_phone_numbers
 from abii_bot.storage import LeadStore
 
 REPO = Path(__file__).parent.parent
 
+_DB_SEQ = 0
+
+
+def mock_tmp_db(tag: str) -> Path:
+    global _DB_SEQ
+    _DB_SEQ += 1
+    return Path(f"/tmp/abii_test_{tag}_{_DB_SEQ}.db")
+
 
 @pytest.fixture(scope="module")
-def mock_api():
+def mock_module():
     import sys
 
     sys.path.insert(0, str(REPO / "examples" / "mock_sites"))
     import mock_torob
 
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), mock_torob.Handler)
+    return mock_torob
+
+
+@pytest.fixture(scope="module")
+def mock_api(mock_module):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), mock_module.Handler)
     th = threading.Thread(target=srv.serve_forever, daemon=True)
     th.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -110,3 +123,100 @@ def test_export_files_created(first_scan):
     assert set(outcome.export_paths) >= {"csv", "xlsx"}
     csv_text = outcome.export_paths["csv"].read_text(encoding="utf-8-sig")
     assert "فروشگاه رایان تک" in csv_text and "09123456789" in csv_text
+
+
+# ---------------- robustness: کلاینت و fallback ----------------
+def test_get_json_404_returns_none(mock_api, mock_module):
+    """404 نباید retry بخورد و نباید استثنا بدهد — فقط None."""
+    import asyncio
+
+    from abii_bot.engine.http_async import AsyncPoliteClient
+
+    cfg = AppConfig()
+    cfg.politeness.min_delay = 0.01
+
+    async def go():
+        client = AsyncPoliteClient(cfg, min_delay=0.01)
+        try:
+            broken = mock_module.API_BROKEN_SHOPS[0]
+            data = await client.get_json(f"{mock_api}/v4/shop/detail/?shop_id={broken}")
+            assert data is None
+            assert client.metrics.requests == 1, "404 نباید retry بخورد"
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
+
+
+def test_get_json_non_json_raises_connection_error(mock_api):
+    """پاسخ 200 اما HTML → ConnectionError کنترل‌شده (نه JSONDecodeError خام)."""
+    import asyncio
+
+    from abii_bot.engine.http_async import AsyncPoliteClient
+
+    cfg = AppConfig()
+    cfg.politeness.max_retries = 1
+    cfg.politeness.min_delay = 0.01
+
+    async def go():
+        client = AsyncPoliteClient(cfg, min_delay=0.01)
+        try:
+            with pytest.raises(ConnectionError):
+                await client.get_json(f"{mock_api}/shop/shop-1/")  # HTML است نه JSON
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
+
+
+def test_web_fallback_recovers_phone_of_broken_api_shop(mock_api, mock_module):
+    """فروشگاهی که APIاش 404 است → شماره از صفحه وب (HTML) بازیابی می‌شود."""
+    import asyncio
+
+    from abii_bot.engine.http_async import AsyncPoliteClient
+
+    cfg = AppConfig(db_path=mock_tmp_db("fallback"))
+    cfg.politeness.min_delay = 0.01
+    store = LeadStore(cfg.db_path)
+    scanner = TorobShopScanner(cfg, ["لپ تاپ"], store, api_base=mock_api)
+
+    broken = mock_module.API_BROKEN_SHOPS[0]
+    expected = extract_phone_numbers(mock_module.SHOPS[broken]["phone"])
+
+    async def go():
+        client = AsyncPoliteClient(cfg, min_delay=0.01)
+        try:
+            lead = await scanner._web_fallback(client, broken)
+            assert lead is not None
+            assert lead.phones == expected, "شماره از HTML بازیابی نشد"
+            assert lead.seller_name == mock_module.SHOPS[broken]["name"]
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
+
+
+def test_web_fallback_cannot_see_button_only_phones(mock_api, mock_module):
+    """شماره‌های JS-injected (پشت دکمه) در HTML خام نیستند → fallback آن‌ها را نمی‌گیرد."""
+    import asyncio
+
+    from abii_bot.engine.http_async import AsyncPoliteClient
+
+    cfg = AppConfig(db_path=mock_tmp_db("behind"))
+    cfg.politeness.min_delay = 0.01
+    store = LeadStore(cfg.db_path)
+    scanner = TorobShopScanner(cfg, ["لپ تاپ"], store, api_base=mock_api)
+
+    behind = sorted(mock_module.PHONE_BEHIND_BUTTON)[0]
+
+    async def go():
+        client = AsyncPoliteClient(cfg, min_delay=0.01)
+        try:
+            lead = await scanner._web_fallback(client, behind)
+            html_phone = extract_phone_numbers(mock_module.SHOPS[behind]["phone"])
+            assert lead is not None and html_phone, "پیش‌شرط تست معتبر نیست"
+            assert lead.phones == [], "نباید شماره JS-injected از HTML خام دربیاید"
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())

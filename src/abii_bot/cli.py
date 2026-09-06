@@ -174,6 +174,57 @@ def platforms():
 
 
 @app.command()
+def stats(
+    db: Optional[Path] = typer.Option(None, "--db", help="مسیر دیتابیس"),
+    config: Optional[Path] = ERR,
+):
+    """آمار دیتابیس لیدها + اجراهای اخیر."""
+    cfg = _cfg(config)
+    store = LeadStore(db or cfg.db_path)
+    s = store.stats()
+    table = Table(title="آمار دیتابیس")
+    table.add_column("شاخص", style="cyan")
+    table.add_column("مقدار")
+    table.add_row("کل لیدها", str(s["total"]))
+    table.add_row("دارای شماره تماس", str(s["with_phone"]))
+    for src, cnt in s["by_source"].items():
+        table.add_row(f" — {src}", str(cnt))
+    table.add_row("اسکن‌های ثبت‌شده", str(s["runs"]))
+    console.print(table)
+
+    runs = store.recent_runs(5)
+    if runs:
+        rt = Table(title="اجراهای اخیر")
+        for col in ["زمان", "پلتفرم", "new", "updated", "duplicate", "errors"]:
+            rt.add_column(col)
+        for r in runs:
+            rt.add_row(
+                (r.get("started_at") or "")[:19], r.get("platform") or "?",
+                str(r.get("new_count", 0)), str(r.get("updated_count", 0)),
+                str(r.get("duplicate_count", 0)), str(r.get("error_count", 0)),
+            )
+        console.print(rt)
+
+
+@app.command()
+def delete(
+    phone: str = typer.Option(..., "--phone", help="شماره‌ای که همه رکوردهایش باید حذف شود"),
+    db: Optional[Path] = typer.Option(None, "--db", help="مسیر دیتابیس"),
+    config: Optional[Path] = ERR,
+    yes: bool = typer.Option(False, "--yes", help="بدون تأیید تعاملی"),
+):
+    """حق حذف: حذف همه رکوردهای دارای یک شماره از دیتابیس."""
+    cfg = _cfg(config)
+    store = LeadStore(db or cfg.db_path)
+    if not yes:
+        confirm = typer.confirm(f"همه رکوردهای دارای شماره {phone} حذف شوند؟")
+        if not confirm:
+            raise typer.Abort()
+    n = store.delete_by_phone(phone)
+    console.print(f"[green]{n} رکورد حذف شد.[/green]" if n else "[yellow]رکوردی پیدا نشد.[/yellow]")
+
+
+@app.command()
 def version():
     console.print(f"AbiiBot v{__version__}")
 
@@ -204,6 +255,7 @@ def scan(
     min_delay: float = typer.Option(1.2, "--min-delay", help="حداقل فاصله درخواست‌ها به هر هاست (ثانیه)"),
     shop_ttl: Optional[float] = typer.Option(None, "--shop-ttl", help="TTL فروشگاه تازه‌ی‌دیده‌شده (ساعت)"),
     always_offers: bool = typer.Option(False, "--always-offers", help="خواندن offers همه محصولات (کشف فروشنده بیشتر، کندتر)"),
+    web_fallback: bool = typer.Option(True, "--web-fallback/--no-web-fallback", help="اگر API فروشگاه جواب نداد/شماره نداشت → صفحه وب HTML"),
     base_url: Optional[str] = typer.Option(None, help="Override هاست API (تست/ماک، مثل http://127.0.0.1:8931)"),
     out: Optional[Path] = typer.Option(None, "--out", help="پوشه خروجی"),
     config: Optional[Path] = ERR,
@@ -223,14 +275,14 @@ def scan(
     outcome = run_torob_engine(
         queries, cfg, workers=workers, max_shops=max_shops, max_pages=max_pages,
         min_delay=min_delay, shop_ttl_hours=shop_ttl, api_base=base_url,
-        always_offers=always_offers,
+        always_offers=always_offers, web_fallback=web_fallback,
     )
 
     m = outcome.metrics
     console.print(Panel.fit(
         f"[bold]متریک موتور[/bold]\n"
         f"فروشگاه یکتا: {m.shops_found} | برداشت: {m.shops_fetched} | "
-        f"رد‌شده (تازه): {m.shops_skipped_fresh}\n"
+        f"رد‌شده (تازه): {m.shops_skipped_fresh} | بازیابی از وب: {m.shops_recovered_web}\n"
         f"شماره پیدا شده: {m.phones_found} | بدون شماره: {m.shops_no_phone}\n"
         f"لید: new={m.leads_new} updated={m.leads_updated} duplicate={m.leads_duplicate}\n"
         f"مدت: {m.duration_sec}s | {m.http.snapshot()}",

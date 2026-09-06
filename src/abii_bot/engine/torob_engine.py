@@ -23,7 +23,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from ..config import AppConfig
 from ..extraction import extract_phones
 from ..models import Lead, utcnow
-from ..pipeline.cleaner import Deduper, normalize_lead
+from ..pipeline.cleaner import Deduper, commit_lead, normalize_lead
 from ..platforms.base import dig, json_text, walk_phone_values
 from ..storage import LeadStore, export_leads
 from .http_async import AsyncPoliteClient, BlockedError, HttpMetrics
@@ -99,6 +99,25 @@ def parse_shop_payload(payload: dict, shop_id: str, url: str) -> Lead:
     return normalize_lead(lead)
 
 
+def parse_shop_html(html: str, shop_id: str, url: str) -> Lead:
+    """HTML صفحه فروشگاه → Lead (fallback وقتی API پاسخ نداد یا شماره نداشت).
+
+    توجه: شماره‌هایی که فقط با کلیک/JS تزریق می‌شوند در HTML خام نیستند —
+    آن‌ها کار گذر مرورگری (`abii browse`) هستند.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "lxml")
+    name = soup.h1.get_text(strip=True) if soup.h1 else None
+    text = soup.get_text(" ", strip=True)
+    phones = [p.number for p in extract_phones(text)]
+    lead = Lead(
+        source="torob", source_id=f"shop:{shop_id}", url=url,
+        title=name, seller_name=name, phones=phones,
+    )
+    return normalize_lead(lead)
+
+
 def load_query_pack(pack: str, path: Optional[Path] = None) -> list[str]:
     """بارگذاری بسته کوئری از configs/queries.torob.yaml."""
     import yaml
@@ -135,6 +154,7 @@ class EngineMetrics:
     shops_fetched: int = 0
     shops_skipped_fresh: int = 0  # به‌خاطر TTL رد شد
     shops_no_phone: int = 0
+    shops_recovered_web: int = 0  # با fallback صفحه وب، شماره/API بازیابی شد
     phones_found: int = 0
     leads_new: int = 0
     leads_updated: int = 0
@@ -174,6 +194,7 @@ class TorobShopScanner:
         shop_ttl_hours: float | None = None,
         api_base: str | None = None,   # برای تست/ماک: http://127.0.0.1:8931
         always_offers: bool = False,   # همیشه offers هم خوانده شود (کشف فروشندههای بیشتر)
+        web_fallback: bool = True,     # اگر API فروشگاه پاسخ نداد/شماره نداشت → صفحه وب HTML
     ):
         self.cfg = cfg
         self.queries = queries
@@ -182,6 +203,7 @@ class TorobShopScanner:
         self.max_pages = max_pages
         self.workers = workers or cfg.workers
         self.min_delay = min_delay
+        self.web_fallback = web_fallback
         self.ttl = timedelta(hours=shop_ttl_hours if shop_ttl_hours is not None else cfg.shop_ttl_hours)
         self.always_offers = always_offers
         ep = cfg.endpoints
@@ -203,16 +225,19 @@ class TorobShopScanner:
             prks = await self._discover_products(client)
             shops = await self._map_shops(client, prks)
             leads = await self._harvest_shops(client, shops)
+        except BlockedError as exc:
+            # IP به‌طور کامل بلاک شده — با داده‌های جمع‌شده تا این لحظه ادامه می‌دهیم
+            logger.critical("توقف اسکن (بلاک کامل): %s", exc)
         finally:
             self.metrics.http = client.metrics
             await client.aclose()
 
-        # ذخیره + خروجی
+        # ذخیره + خروجی (امن: duplicate بازنویسی نمی‌کند، updated ادغام می‌شود)
         deduper = Deduper(self.store)
         for lead in leads:
-            lead.status = deduper.classify(lead)
-            self.store.upsert(lead)
-            key = {"new": "leads_new", "updated": "leads_updated", "duplicate": "leads_duplicate"}[lead.status]
+            status = commit_lead(lead, self.store, deduper)
+            lead.status = status
+            key = {"new": "leads_new", "updated": "leads_updated", "duplicate": "leads_duplicate"}[status]
             setattr(self.metrics, key, getattr(self.metrics, key) + 1)
 
         export_paths: dict[str, Path] = {}
@@ -246,8 +271,16 @@ class TorobShopScanner:
                 url = self._urls["search"].format(query=quote(q, safe=""), page=page)
                 try:
                     data = await client.get_json(url)
-                except (ConnectionError, BlockedError) as exc:
+                except BlockedError:
+                    raise
+                except ConnectionError as exc:
                     logger.error("search failed q=%s page=%s: %s", q, page, exc)
+                    break
+                if client.abort_requested:
+                    logger.critical("قطع‌کننده مدار: بلاک‌های متوالی زیاد — توقف کشف")
+                    return prks
+                if data is None:
+                    logger.warning("search q=%s page=%s → 404/410", q, page)
                     break
                 self.metrics.pages_fetched += 1
                 results = data.get("results") or dig(data, "result.results") or []
@@ -280,18 +313,23 @@ class TorobShopScanner:
                 prk = await q.get()
                 if prk is None:
                     return
+                if client.abort_requested:
+                    logger.critical("قطع‌کننده مدار فعال — توقف نگاشت")
+                    return
                 self.metrics.products_seen += 1
                 found: dict[str, Optional[str]] = {}
                 try:
                     detail = await client.get_json(self._urls["detail"].format(prk=prk))
-                    found = walk_shop_ids(detail)
+                    if detail is not None:
+                        found = walk_shop_ids(detail)
                 except (ConnectionError, BlockedError) as exc:
                     logger.warning("detail %s failed: %s", prk, exc)
                 if (not found or self.always_offers) and self._urls["offers"]:
                     try:
                         offers = await client.get_json(self._urls["offers"].format(prk=prk))
-                        for sid, name in walk_shop_ids(offers).items():
-                            found.setdefault(sid, name)
+                        if offers is not None:
+                            for sid, name in walk_shop_ids(offers).items():
+                                found.setdefault(sid, name)
                     except (ConnectionError, BlockedError) as exc:
                         logger.debug("offers %s failed: %s", prk, exc)
                 for sid, name in found.items():
@@ -331,14 +369,41 @@ class TorobShopScanner:
                 sid = await q.get()
                 if sid is None:
                     return
+                if client.abort_requested:
+                    logger.critical("قطع‌کننده مدار فعال — توقف برداشت (IP به‌نظر بلاک است)")
+                    return
                 url = self._urls["shop"].format(shop_id=sid)
+                lead: Lead | None = None
+                api_failed = False
                 try:
                     payload = await client.get_json(url)
+                    if payload is None:
+                        api_failed = True  # 404/410 — endpoint فروشگاه در دسترس نیست
+                    else:
+                        lead = await loop.run_in_executor(
+                            None, parse_shop_payload, payload, sid, url
+                        )
                 except (ConnectionError, BlockedError) as exc:
-                    logger.warning("shop %s failed: %s", sid, exc)
+                    api_failed = True
+                    logger.warning("shop %s API failed: %s", sid, exc)
+
+                # fallback صفحه وب: API جواب نداد یا شماره نداشت
+                if self.web_fallback and (api_failed or (lead is not None and not lead.phones)):
+                    fb = await self._web_fallback(client, sid)
+                    if fb is not None:
+                        if api_failed:
+                            lead = fb
+                            self.metrics.shops_recovered_web += 1
+                        elif fb.phones:
+                            lead.phones = list(
+                                dict.fromkeys((*lead.phones, *fb.phones))
+                            )
+                            if fb.seller_name and not lead.seller_name:
+                                lead.seller_name = fb.seller_name
+                            self.metrics.shops_recovered_web += 1
+                if lead is None:
                     continue
                 self.metrics.shops_fetched += 1
-                lead = await loop.run_in_executor(None, parse_shop_payload, payload, sid, url)
                 if lead.phones:
                     self.metrics.phones_found += len(lead.phones)
                 else:
@@ -346,9 +411,25 @@ class TorobShopScanner:
                 leads.append(lead)
 
         await asyncio.gather(*(worker() for _ in range(self.workers)))
-        logger.info("[harvest] %s فروشگاه برداشت شد (%s بدون شماره)",
-                    self.metrics.shops_fetched, self.metrics.shops_no_phone)
+        logger.info("[harvest] %s فروشگاه برداشت شد (%s بدون شماره، %s بازیابی از وب)",
+                    self.metrics.shops_fetched, self.metrics.shops_no_phone,
+                    self.metrics.shops_recovered_web)
         return leads
+
+    async def _web_fallback(self, client: AsyncPoliteClient, shop_id: str) -> Lead | None:
+        """دریافت صفحه HTML فروشگاه و استخراج شماره — وقتی API کافی نبود."""
+        if not self._urls.get("shop_web"):
+            return None
+        url = self._urls["shop_web"].format(shop_id=shop_id)
+        try:
+            html = await client.get_text(url)
+        except (ConnectionError, BlockedError) as exc:
+            logger.debug("web fallback %s failed: %s", shop_id, exc)
+            return None
+        if not html:
+            return None
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, parse_shop_html, html, shop_id, url)
 
 
 # --------------------------------------------------------------------- entry

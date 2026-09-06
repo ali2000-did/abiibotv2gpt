@@ -61,6 +61,67 @@ def test_deduper_statuses(tmp_path):
     assert set(got.phones) == {"09121112222", "02188776655"}
 
 
+# ---------- commit_lead: جلوگیری از تضعیف داده + ادغام ----------
+def test_commit_lead_duplicate_does_not_weaken(tmp_path):
+    """داده ضعیف (بدون شماره) نباید رکورد قوی قبلی را بازنویسی کند."""
+    from abii_bot.pipeline import commit_lead
+
+    store = LeadStore(tmp_path / "t.db")
+    dd = Deduper(store)
+    strong = normalize_lead(_lead(phones=["09121112222"], city="تهران", title="فروشگاه کامل"))
+    assert commit_lead(strong, store, dd) == "new"
+
+    weak = normalize_lead(_lead(phones=[]))  # این بار بدون شماره
+    assert commit_lead(weak, store, dd) == "duplicate"
+
+    got = store.get("x", "1")
+    assert got.phones == ["09121112222"]
+    assert got.city == "تهران" and got.title == "فروشگاه کامل"
+
+
+def test_commit_lead_updated_merges_phones(tmp_path):
+    """شماره جدید باید با قدیمی اجتماع شود، نه جایگزین."""
+    from abii_bot.pipeline import commit_lead
+
+    store = LeadStore(tmp_path / "t.db")
+    dd = Deduper(store)
+    commit_lead(normalize_lead(_lead(phones=["09121112222"], title="الف")), store, dd)
+    second = normalize_lead(_lead(phones=["09351112233"], title=None))  # عنوان ندارد
+    assert commit_lead(second, store, dd) == "updated"
+
+    got = store.get("x", "1")
+    assert set(got.phones) == {"09121112222", "09351112233"}
+    assert got.title == "الف"  # فیلد پرشده قبلی حفظ شد
+
+
+def test_touch_updates_last_seen_only(tmp_path):
+    from datetime import timedelta
+
+    from abii_bot.models import Lead as L
+
+    store = LeadStore(tmp_path / "t.db")
+    lead = normalize_lead(_lead(phones=["09121112222"]))
+    store.upsert(lead)
+    before = store.get("x", "1")
+    before.last_seen -= timedelta(hours=2)
+    store.upsert(before)  # بازنویسی با زمان قدیمی
+    store.touch("x", "1")
+    after = store.get("x", "1")
+    assert after.last_seen > before.last_seen
+
+
+# ---------- حق حذف ----------
+def test_delete_by_phone(tmp_path):
+    store = LeadStore(tmp_path / "t.db")
+    store.upsert(normalize_lead(_lead(source_id="1", phones=["09121112222"])))
+    store.upsert(normalize_lead(_lead(source_id="2", phones=["09121112222", "02188776655"])))
+    store.upsert(normalize_lead(_lead(source_id="3", phones=["09350001122"])))
+    assert store.delete_by_phone("09121112222") == 2
+    assert store.get("x", "3") is not None
+    assert store.get("x", "1") is None
+    assert store.stats()["total"] == 1
+
+
 # ---------- export ----------
 def test_export_csv_xlsx(tmp_path):
     leads = [normalize_lead(_lead(source_id=str(i), phones=[f"0912111222{i}"])) for i in range(3)]

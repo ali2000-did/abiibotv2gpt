@@ -4,6 +4,7 @@ from .torob_engine import (
     ScanOutcome,
     TorobShopScanner,
     load_query_pack,
+    parse_shop_html,
     parse_shop_payload,
     run_torob_engine,
     walk_shop_ids,
