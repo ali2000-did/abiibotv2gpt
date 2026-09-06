@@ -45,6 +45,9 @@ class EndpointConfig:
     divar_web_fallback: str = "https://divar.ir/v/{token}"
     torob_search: str = "https://api.torob.com/v4/base-product/search/?q={query}&size=24&page={page}"
     torob_detail: str = "https://api.torob.com/v4/base-product/detail-v2/?prk={prk}"
+    torob_offers: str = "https://api.torob.com/v4/base-product/offer-list/?prk={prk}&size=24"
+    torob_shop: str = "https://api.torob.com/v4/shop/detail/?shop_id={shop_id}"  # NEEDS LIVE VERIFICATION
+    torob_shop_web: str = "https://torob.com/shop/{shop_id}/"
     torob_web_fallback: str = "https://torob.com/p/{prk}/"
 
 
@@ -57,6 +60,8 @@ class AppConfig:
     proxies: list[str] = field(default_factory=list)  # اختیاری: http://user:pass@host:port
     user_agents: list[str] = field(default_factory=lambda: list(DEFAULT_USER_AGENTS))
     export_formats: list[str] = field(default_factory=lambda: ["csv", "xlsx"])
+    workers: int = 4  # تعداد workerهای ناهمگام موتور
+    shop_ttl_hours: float = 168.0  # فروشگاهی که اخیراً اسکن شده، تا این مدت دوباره fetch نشود
 
     # ---------- serialization ----------
     def to_dict(self) -> dict:
@@ -80,6 +85,8 @@ class AppConfig:
             proxies=list(data.get("proxies", [])),
             user_agents=list(data.get("user_agents", DEFAULT_USER_AGENTS)),
             export_formats=list(data.get("export_formats", ["csv", "xlsx"])),
+            workers=int(data.get("workers", 4)),
+            shop_ttl_hours=float(data.get("shop_ttl_hours", 168.0)),
         )
         for k, v in overrides.items():
             if v is not None and hasattr(cfg, k):

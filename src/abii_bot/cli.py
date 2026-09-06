@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
@@ -19,6 +20,8 @@ app = typer.Typer(
     help="AbiiBot — ربات استخراج لید (شماره تماس فروشندگان) از دیوار، ترب و وب",
     no_args_is_help=True, add_completion=False,
 )
+torob_app = typer.Typer(help="موتور ترب — اسکن ناهمگام فروشگاه‌محور", no_args_is_help=True)
+app.add_typer(torob_app, name="torob")
 console = Console()
 ERR = typer.Option(None, "--config", help="مسیر فایل تنظیمات YAML")
 
@@ -188,6 +191,79 @@ def _print_report(report) -> None:
     console.print(f"[cyan]خلاصه:[/cyan] {report.summary()}")
     if report.export_paths:
         console.print("[cyan]خروجی‌ها:[/cyan] " + " | ".join(str(p) for p in report.export_paths.values()))
+
+
+# ═══════════════════════════ abii torob scan ═══════════════════════════
+@torob_app.command()
+def scan(
+    query: List[str] = typer.Option(None, "--query", "-q", help="کوئری جستجو (تکرارپذیر) — جایگزین pack"),
+    pack: str = typer.Option("digital", "--pack", help="نام بسته کوئری از configs/queries.torob.yaml"),
+    workers: int = typer.Option(4, "--workers", "-w", help="تعداد workerهای همزمان"),
+    max_shops: int = typer.Option(100, "--max-shops", help="حداکثر فروشگاه جدید در این اجرا"),
+    max_pages: int = typer.Option(3, "--max-pages", help="حداکثر صفحه جستجو برای هر کوئری"),
+    min_delay: float = typer.Option(1.2, "--min-delay", help="حداقل فاصله درخواست‌ها به هر هاست (ثانیه)"),
+    shop_ttl: Optional[float] = typer.Option(None, "--shop-ttl", help="TTL فروشگاه تازه‌ی‌دیده‌شده (ساعت)"),
+    always_offers: bool = typer.Option(False, "--always-offers", help="خواندن offers همه محصولات (کشف فروشنده بیشتر، کندتر)"),
+    base_url: Optional[str] = typer.Option(None, help="Override هاست API (تست/ماک، مثل http://127.0.0.1:8931)"),
+    out: Optional[Path] = typer.Option(None, "--out", help="پوشه خروجی"),
+    config: Optional[Path] = ERR,
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """اسکن ناهمگام فروشگاه‌محور: جستجو → محصولات → فروشگاه‌ها (هرکدام یک بار) → شماره تماس."""
+    setup_logging(verbose)
+    cfg = _cfg(config)
+    if out:
+        cfg.export_dir = out
+
+    from .engine import load_query_pack, run_torob_engine
+
+    queries = list(query) if query else load_query_pack(pack)
+    preview = "، ".join(queries[:6]) + ("…" if len(queries) > 6 else "")
+    console.print(f"[cyan]شروع اسکن ترب[/cyan] | کوئری‌ها ({len(queries)}): {preview}")
+    outcome = run_torob_engine(
+        queries, cfg, workers=workers, max_shops=max_shops, max_pages=max_pages,
+        min_delay=min_delay, shop_ttl_hours=shop_ttl, api_base=base_url,
+        always_offers=always_offers,
+    )
+
+    m = outcome.metrics
+    console.print(Panel.fit(
+        f"[bold]متریک موتور[/bold]\n"
+        f"فروشگاه یکتا: {m.shops_found} | برداشت: {m.shops_fetched} | "
+        f"رد‌شده (تازه): {m.shops_skipped_fresh}\n"
+        f"شماره پیدا شده: {m.phones_found} | بدون شماره: {m.shops_no_phone}\n"
+        f"لید: new={m.leads_new} updated={m.leads_updated} duplicate={m.leads_duplicate}\n"
+        f"مدت: {m.duration_sec}s | {m.http.snapshot()}",
+        title="torob engine",
+    ))
+
+    table = Table(title=f"لیدهای فروشگاهی — {len(outcome.leads)} عدد", show_lines=False)
+    for col in ["#", "فروشگاه", "شماره تماس", "شهر", "کیفیت", "وضعیت"]:
+        table.add_column(col, overflow="fold")
+    for i, lead in enumerate(outcome.leads[:30], 1):
+        table.add_row(
+            str(i), (lead.seller_name or "—")[:36], ", ".join(lead.phones) or "—",
+            lead.city or "—", str(lead.quality_score), lead.status,
+        )
+    console.print(table)
+    if len(outcome.leads) > 30:
+        console.print(f"[dim]… و {len(outcome.leads) - 30} مورد دیگر (در فایل خروجی)[/dim]")
+    for p in outcome.export_paths.values():
+        console.print(f"[cyan]خروجی:[/cyan] {p}")
+
+
+@torob_app.command()
+def packs():
+    """فهرست بسته‌های کوئری موجود."""
+    from .engine import load_query_pack
+    import yaml
+
+    p = Path("configs/queries.torob.yaml")
+    if not p.exists():
+        p = Path(__file__).resolve().parents[2] / "configs" / "queries.torob.yaml"
+    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    for name, queries in data.items():
+        console.print(f"[green]{name}[/green] ({len(queries)} کوئری): {'، '.join(queries[:5])}…")
 
 
 if __name__ == "__main__":

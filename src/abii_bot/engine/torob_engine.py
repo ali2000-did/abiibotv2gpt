@@ -1,0 +1,364 @@
+"""موتور ناهمگامِ فروشگاه‌محور ترب — پرفورمنس بالا با احترام به سرور.
+
+معماری (۳ فاز):
+  فاز ۱ — کشف:       کوئری‌ها → صفحه‌بندی جستجو → فهرست prk محصولات
+  فاز ۲ — نگاشت:     هر محصول → شناسه فروشگاه‌هایش (detail + offers)
+  فاز ۳ — برداشت:    هر فروشگاه فقط یک بار fetch → نام/شماره/شهر → Lead
+
+کلید پرفورمنس: فروشگاه‌ها بین محصولات مشترک‌اند؛ dedupe قبل از fetch یعنی
+هیچ فروشگاهی دو بار دانلود نمی‌شود. اسکن افزایشی: فروشگاه تازه‌ی دید‌شده
+(shop_ttl_hours) رد می‌شود → اجرای مجدد فقط داده جدید می‌آورد.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import timedelta
+from pathlib import Path
+from typing import Iterable, Optional
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from ..config import AppConfig
+from ..extraction import extract_phones
+from ..models import Lead, utcnow
+from ..pipeline.cleaner import Deduper, normalize_lead
+from ..platforms.base import dig, json_text, walk_phone_values
+from ..storage import LeadStore, export_leads
+from .http_async import AsyncPoliteClient, BlockedError, HttpMetrics
+
+logger = logging.getLogger(__name__)
+
+# کلیدهایی که «شناسه فروشگاه» در آن‌ها قرار می‌گیرد
+_SHOP_ID_KEYS = {"shop_id", "shopid", "seller_id", "store_id"}
+_SHOP_NAME_KEYS = {"shop_name", "seller_name", "store_name", "name", "title"}
+_CITY_KEYS = {"city", "city_name", "province", "town"}
+
+
+# --------------------------------------------------------------------- helpers
+def walk_shop_ids(node) -> dict[str, Optional[str]]:
+    """پیمایش بازگشتی JSON و جمع‌آوری شناسه فروشگاه‌ها → {shop_id: name?}."""
+    found: dict[str, Optional[str]] = {}
+
+    def _walk(n):
+        if isinstance(n, dict):
+            sid = next((n[k] for k in _SHOP_ID_KEYS if n.get(k) not in (None, "", 0)), None)
+            if sid is not None:
+                name = next((n[k] for k in _SHOP_NAME_KEYS if isinstance(n.get(k), str) and n[k]), None)
+                if str(sid) not in found:
+                    found[str(sid)] = name
+            # فرم تودرتو: {"shop": {"id": .., "name": ..}}
+            shop = n.get("shop")
+            if isinstance(shop, dict):
+                inner = next((shop[k] for k in (list(_SHOP_ID_KEYS) + ["id"]) if shop.get(k)), None)
+                if inner is not None and str(inner) not in found:
+                    found[str(inner)] = next(
+                        (shop[k] for k in _SHOP_NAME_KEYS if isinstance(shop.get(k), str) and shop[k]), None
+                    )
+            for v in n.values():
+                _walk(v)
+        elif isinstance(n, list):
+            for item in n:
+                _walk(item)
+
+    _walk(node)
+    return found
+
+
+def walk_first(node, keys: Iterable[str]):
+    keyset = set(keys)
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k.lower() in keyset and isinstance(v, str) and v.strip():
+                return v
+        for v in node.values():
+            r = walk_first(v, keyset)
+            if r:
+                return r
+    elif isinstance(node, list):
+        for item in node:
+            r = walk_first(item, keyset)
+            if r:
+                return r
+    return None
+
+
+def parse_shop_payload(payload: dict, shop_id: str, url: str) -> Lead:
+    """JSON فروشگاه → Lead نرمال‌شده (مقاوم در برابر تغییر نام فیلدها)."""
+    name = walk_first(payload, _SHOP_NAME_KEYS)
+    city = walk_first(payload, _CITY_KEYS)
+    candidates = "\n".join(walk_phone_values(payload))
+    phones = [p.number for p in extract_phones(candidates)]
+    if not phones:
+        phones = [p.number for p in extract_phones(json_text(payload))]
+    lead = Lead(
+        source="torob", source_id=f"shop:{shop_id}", url=url,
+        title=name, seller_name=name, city=city, phones=phones,
+    )
+    return normalize_lead(lead)
+
+
+def load_query_pack(pack: str, path: Optional[Path] = None) -> list[str]:
+    """بارگذاری بسته کوئری از configs/queries.torob.yaml."""
+    import yaml
+
+    p = path or Path(__file__).resolve().parents[2] / "configs" / "queries.torob.yaml"
+    if not p.exists():
+        p = Path.cwd() / "configs" / "queries.torob.yaml"
+    if not p.exists():
+        raise FileNotFoundError(f"فایل بسته کوئری پیدا نشد: {p}")
+    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    if pack not in data:
+        available = "، ".join(data) or "—"
+        raise ValueError(f"بسته '{pack}' موجود نیست. موجود: {available}")
+    return [str(q) for q in data[pack]]
+
+
+def _rebase(url: str, base: str) -> str:
+    """جابه‌جایی scheme+host یک endpoint به base دیگر (تست/ماک) با حفظ مسیر."""
+    if not base:
+        return url
+    b = urlsplit(base)
+    s = urlsplit(url)
+    return urlunsplit((b.scheme, b.netloc, s.path, s.query, s.fragment))
+
+
+# --------------------------------------------------------------------- metrics
+@dataclass
+class EngineMetrics:
+    http: HttpMetrics = field(default_factory=HttpMetrics)
+    queries: int = 0
+    pages_fetched: int = 0
+    products_seen: int = 0
+    shops_found: int = 0          # یکتای کشف‌شده
+    shops_fetched: int = 0
+    shops_skipped_fresh: int = 0  # به‌خاطر TTL رد شد
+    shops_no_phone: int = 0
+    phones_found: int = 0
+    leads_new: int = 0
+    leads_updated: int = 0
+    leads_duplicate: int = 0
+    duration_sec: float = 0.0
+
+    def summary(self) -> str:
+        rate = (self.shops_fetched / self.duration_sec * 60) if self.duration_sec else 0
+        return (
+            f"کوئری={self.queries} صفحه={self.pages_fetched} محصول={self.products_seen} | "
+            f"فروشگاه یکتا={self.shops_found} برداشت={self.shops_fetched} "
+            f"رد‌شده(تازه)={self.shops_skipped_fresh} | "
+            f"شماره‌ها={self.phones_found} بدون‌شماره={self.shops_no_phone} | "
+            f"new={self.leads_new} updated={self.leads_updated} dup={self.leads_duplicate} | "
+            f"{rate:.0f} فروشگاه/دقیقه | {self.http.snapshot()}"
+        )
+
+
+@dataclass
+class ScanOutcome:
+    leads: list[Lead] = field(default_factory=list)
+    metrics: EngineMetrics = field(default_factory=EngineMetrics)
+    export_paths: dict[str, Path] = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------- engine
+class TorobShopScanner:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        queries: list[str],
+        store: LeadStore,
+        max_shops: int = 100,
+        max_pages: int = 3,
+        workers: int | None = None,
+        min_delay: float | None = None,
+        shop_ttl_hours: float | None = None,
+        api_base: str | None = None,   # برای تست/ماک: http://127.0.0.1:8931
+        always_offers: bool = False,   # همیشه offers هم خوانده شود (کشف فروشندههای بیشتر)
+    ):
+        self.cfg = cfg
+        self.queries = queries
+        self.store = store
+        self.max_shops = max_shops
+        self.max_pages = max_pages
+        self.workers = workers or cfg.workers
+        self.min_delay = min_delay
+        self.ttl = timedelta(hours=shop_ttl_hours if shop_ttl_hours is not None else cfg.shop_ttl_hours)
+        self.always_offers = always_offers
+        ep = cfg.endpoints
+        self._urls = {
+            "search": _rebase(ep.torob_search, api_base),
+            "detail": _rebase(ep.torob_detail, api_base),
+            "offers": _rebase(ep.torob_offers, api_base),
+            "shop": _rebase(ep.torob_shop, api_base),
+            "shop_web": _rebase(ep.torob_shop_web, api_base),
+        }
+        self.metrics = EngineMetrics()
+
+    # ------------------------------------------------------------------ run
+    async def run(self) -> ScanOutcome:
+        t0 = time.monotonic()
+        client = AsyncPoliteClient(self.cfg, min_delay=self.min_delay)
+        leads: list[Lead] = []
+        try:
+            prks = await self._discover_products(client)
+            shops = await self._map_shops(client, prks)
+            leads = await self._harvest_shops(client, shops)
+        finally:
+            self.metrics.http = client.metrics
+            await client.aclose()
+
+        # ذخیره + خروجی
+        deduper = Deduper(self.store)
+        for lead in leads:
+            lead.status = deduper.classify(lead)
+            self.store.upsert(lead)
+            key = {"new": "leads_new", "updated": "leads_updated", "duplicate": "leads_duplicate"}[lead.status]
+            setattr(self.metrics, key, getattr(self.metrics, key) + 1)
+
+        export_paths: dict[str, Path] = {}
+        if leads:
+            export_paths = export_leads(
+                leads, out_dir=self.cfg.export_dir, formats=self.cfg.export_formats,
+                name_prefix=f"leads_torob_{utcnow().strftime('%Y%m%d_%H%M%S')}",
+            )
+        self.metrics.duration_sec = round(time.monotonic() - t0, 1)
+        self.store.record_run(
+            {"platform": "torob", "mode": "engine", "queries": self.queries,
+             "max_shops": self.max_shops},
+            {"new": self.metrics.leads_new, "updated": self.metrics.leads_updated,
+             "duplicate": self.metrics.leads_duplicate,
+             "errors": self.metrics.http.errors},
+            utcnow(),
+        )
+        logger.info("torob engine finished: %s", self.metrics.summary())
+        return ScanOutcome(leads=leads, metrics=self.metrics, export_paths=export_paths)
+
+    # ------------------------------------------------------------------ فاز ۱
+    async def _discover_products(self, client: AsyncPoliteClient) -> list[str]:
+        prks: list[str] = []
+        seen: set[str] = set()
+        product_cap = max(12, self.max_shops * 3)  # هر محصول به‌طور میانگین ~۱-۳ فروشگاه دارد
+        for q in self.queries:
+            if len(prks) >= product_cap:
+                break
+            self.metrics.queries += 1
+            for page in range(1, self.max_pages + 1):
+                url = self._urls["search"].format(query=quote(q, safe=""), page=page)
+                try:
+                    data = await client.get_json(url)
+                except (ConnectionError, BlockedError) as exc:
+                    logger.error("search failed q=%s page=%s: %s", q, page, exc)
+                    break
+                self.metrics.pages_fetched += 1
+                results = data.get("results") or dig(data, "result.results") or []
+                batch = [
+                    str(r.get("random_key") or r.get("prk") or r.get("id") or "")
+                    for r in results
+                ]
+                fresh = [p for p in batch if p and p not in seen]
+                for p in fresh:
+                    seen.add(p)
+                prks.extend(fresh)
+                logger.info("[discover] q='%s' page=%s → %s محصول (مجموع %s)", q, page, len(fresh), len(prks))
+                if not fresh:
+                    break
+                if len(prks) >= product_cap:
+                    break
+        return prks
+
+    # ------------------------------------------------------------------ فاز ۲
+    async def _map_shops(self, client: AsyncPoliteClient, prks: list[str]) -> dict[str, Optional[str]]:
+        shops: dict[str, Optional[str]] = {}
+        q: asyncio.Queue = asyncio.Queue()
+        for prk in prks:
+            q.put_nowait(prk)
+        for _ in range(self.workers):
+            q.put_nowait(None)
+
+        async def worker():
+            while True:
+                prk = await q.get()
+                if prk is None:
+                    return
+                self.metrics.products_seen += 1
+                found: dict[str, Optional[str]] = {}
+                try:
+                    detail = await client.get_json(self._urls["detail"].format(prk=prk))
+                    found = walk_shop_ids(detail)
+                except (ConnectionError, BlockedError) as exc:
+                    logger.warning("detail %s failed: %s", prk, exc)
+                if (not found or self.always_offers) and self._urls["offers"]:
+                    try:
+                        offers = await client.get_json(self._urls["offers"].format(prk=prk))
+                        for sid, name in walk_shop_ids(offers).items():
+                            found.setdefault(sid, name)
+                    except (ConnectionError, BlockedError) as exc:
+                        logger.debug("offers %s failed: %s", prk, exc)
+                for sid, name in found.items():
+                    shops.setdefault(sid, name)
+                if len(shops) >= self.max_shops * 2:
+                    return  # به‌اندازه کافی فروشگاه داریم؛ فاز بعد سقف نهایی را اعمال می‌کند
+
+        await asyncio.gather(*(worker() for _ in range(self.workers)))
+        self.metrics.shops_found = len(shops)
+        logger.info("[map] %s محصول → %s فروشگاه یکتا", self.metrics.products_seen, len(shops))
+        return shops
+
+    # ------------------------------------------------------------------ فاز ۳
+    async def _harvest_shops(self, client: AsyncPoliteClient, shops: dict[str, Optional[str]]) -> list[Lead]:
+        # فیلتر افزایشی: فروشگاه تازه‌ی دید‌شده رد شود (TTL)
+        fresh: list[str] = []
+        now = utcnow()
+        for sid in shops:
+            prev = self.store.get("torob", f"shop:{sid}")
+            if prev is not None and (now - prev.last_seen) < self.ttl:
+                self.metrics.shops_skipped_fresh += 1
+                continue
+            fresh.append(sid)
+            if len(fresh) >= self.max_shops:
+                break
+
+        q: asyncio.Queue = asyncio.Queue()
+        for sid in fresh:
+            q.put_nowait(sid)
+        for _ in range(self.workers):
+            q.put_nowait(None)
+        leads: list[Lead] = []
+        loop = asyncio.get_running_loop()
+
+        async def worker():
+            while True:
+                sid = await q.get()
+                if sid is None:
+                    return
+                url = self._urls["shop"].format(shop_id=sid)
+                try:
+                    payload = await client.get_json(url)
+                except (ConnectionError, BlockedError) as exc:
+                    logger.warning("shop %s failed: %s", sid, exc)
+                    continue
+                self.metrics.shops_fetched += 1
+                lead = await loop.run_in_executor(None, parse_shop_payload, payload, sid, url)
+                if lead.phones:
+                    self.metrics.phones_found += len(lead.phones)
+                else:
+                    self.metrics.shops_no_phone += 1
+                leads.append(lead)
+
+        await asyncio.gather(*(worker() for _ in range(self.workers)))
+        logger.info("[harvest] %s فروشگاه برداشت شد (%s بدون شماره)",
+                    self.metrics.shops_fetched, self.metrics.shops_no_phone)
+        return leads
+
+
+# --------------------------------------------------------------------- entry
+def run_torob_engine(
+    queries: list[str],
+    cfg: AppConfig,
+    store: Optional[LeadStore] = None,
+    **kwargs,
+) -> ScanOutcome:
+    """نقطه ورود همگام (asyncio.run داخلی)."""
+    store = store or LeadStore(cfg.db_path)
+    scanner = TorobShopScanner(cfg, queries, store, **kwargs)
+    return asyncio.run(scanner.run())

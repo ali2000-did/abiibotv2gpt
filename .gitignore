@@ -20,6 +20,10 @@ sessions/
 *.db
 *.sqlite3
 
+# تنظیمات محلی با اطلاعات حساس (پروکسی و…) — کامیت نمی‌شوند
+configs/*.local.yaml
+*.local.yaml
+
 # OS / Editor
 .DS_Store
 .idea/
