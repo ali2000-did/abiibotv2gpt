@@ -1,0 +1,46 @@
+# سلکتورهای جریان مرورگری ترب — قابل ویرایش بدون تغییر کد
+#
+# هر فیلد یک «لیست کاندید» است: اولین موردی که در صفحه پیدا شود استفاده می‌شود.
+# اگر ترب ساختار/کلاس‌هایش را عوض کرد، فقط همین فایل را به‌روز کنید.
+# (الگوهای ^= ، *= ، text= پشتیبانی می‌شوند — سینتکس Playwright)
+
+base_url: https://torob.com
+
+search:
+  input:
+    - "input[name='q']"
+    - "input[placeholder*='جستجو']"
+    - "input[placeholder*='سرچ']"
+    - "input[type='search']"
+  submit:
+    - "button[type='submit']"
+    - "button:has-text('جستجو')"
+
+results:
+  wait_for:
+    - "a[href*='/p/']"
+  product_link: "a[href*='/p/']"
+
+product:
+  title:
+    - "h1"
+    - "[class*='product'] h1"
+  price:
+    - "[class*='price']"
+  shop_link:
+    - "a[href*='/shop/']"
+    - "a[href*='shop']"
+  show_phone:
+    - "button:has-text('نمایش شماره')"
+    - "text=نمایش شماره"
+
+shop:
+  title:
+    - "h1"
+    - "[class*='shop'] h1"
+  show_phone:
+    - "button:has-text('نمایش شماره')"
+    - "button:has-text('تماس')"
+    - "text=نمایش شماره"
+  phone_text:
+    - "body"

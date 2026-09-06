@@ -40,6 +40,29 @@ abii run -p web --url https://example-shop.ir/contact --url https://other.ir
 abii export --format xlsx
 ```
 
+## 🤖 جریان مرورگری کاربرگونه (Playwright + Chromium) — فاز ۲
+
+رفتار دقیقاً مثل یک کاربر: وارد سایت می‌شود، عبارت را حرف‌به‌حرف تایپ می‌کند،
+روی محصولات نتایج کلیک می‌کند، وارد صفحه فروشنده می‌شود، دکمه «نمایش شماره»
+را می‌زند و شماره را کپی می‌کند؛ سپس محصول بعدی.
+
+```bash
+# نصب کرومیوم (یک بار) — اگر CDN پلی‌رایت فیلتر بود، خودش از npm نصب می‌کند
+bash scripts/setup_browser.sh
+
+# اجرا روی ترب واقعی (داخل ایران) — پنجره مرورگر قابل مشاهده + ضبط ویدیو
+abii browse -p torob --query "لپ تاپ" --max-products 10 --headed --record
+
+# اجرای شبیه‌سازی‌شده بدون اینترنت (روی سرور ماک محلی — برای تست/دمو)
+python examples/mock_sites/mock_torob.py 8931 &
+abii browse -p torob --query "لپ تاپ" --base-url http://127.0.0.1:8931 --record
+```
+
+- ویدیو + اسکرین‌شات هر قدم در `sessions/<timestamp>/` ذخیره می‌شود
+- سلکتورهای ترب در `configs/selectors.torob.yaml` — اگر ساختار سایت عوض شد فقط همین فایل را به‌روز کنید
+- تایپ انسانی (تأخیر تصادفی بین حروف)، مکث‌های تصادفی، اسکرول طبیعی، حذف نشانه‌های اتوماسیون
+- شماره‌های پشت دکمه «نمایش شماره» با کلیک واقعی استخراج می‌شوند (چیزی که در سورس HTML نیست!)
+
 ## تنظیمات (اختیاری)
 
 ```yaml
@@ -64,9 +87,10 @@ abii run --config config.yaml -p divar --city tehran --category mobile-phones
 
 ```
 src/abii_bot/
-├── cli.py          دستورات abii (run/demo/export)
-├── runner.py       ارکستراتور pipeline
-├── crawler/        HttpFetcher (rate-limit/rotproxy/retry) + BrowserFetcher
+├── cli.py          دستورات abii (run/demo/export/browse)
+├── runner.py       ارکستراتور pipeline (حالت API)
+├── browser/        جریان مرورگری کاربرگونه (Playwright) — فاز ۲
+├── crawler/        HttpFetcher (rate-limit/proxy/retry) + BrowserFetcher
 ├── platforms/      آداپتور divar / torob / web + registry
 ├── extraction/     تشخیص شماره ایرانی (ارقام فارسی، +98، پیش‌شماره‌ها) + ایمیل
 ├── pipeline/       پاکسازی + dedupe + امتیاز کیفیت

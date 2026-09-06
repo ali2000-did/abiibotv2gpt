@@ -90,6 +90,61 @@ def demo(config: Optional[Path] = ERR):
 
 
 @app.command()
+def browse(
+    platform: str = typer.Option("torob", "--platform", "-p", help="فعلاً: torob"),
+    query: str = typer.Option(..., "--query", "-q", help="عبارت جستجو (مثل: لپ تاپ)"),
+    max_products: int = typer.Option(5, "--max-products", help="حداکثر تعداد محصولی که کلیک می‌شود"),
+    max_shops: int = typer.Option(1, "--max-shops", help="حداکثر فروشنده هر محصول"),
+    headless: bool = typer.Option(True, "--headless/--headed", help="headed = پنجره مرورگر قابل مشاهده"),
+    record: bool = typer.Option(False, "--record", help="ضبط ویدیو + اسکرین‌شات جلسه در sessions/"),
+    base_url: Optional[str] = typer.Option(None, help=" Override آدرس سایت (تست/دمو)"),
+    min_delay: Optional[float] = typer.Option(None, help="حداقل مکث بین اکشن‌ها (ثانیه)"),
+    selectors_file: Optional[Path] = typer.Option(None, help="فایل YAML سلکتورهای اختصاصی"),
+    out: Optional[Path] = typer.Option(None, "--out", help="پوشه خروجی"),
+    config: Optional[Path] = ERR,
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """جریان مرورگری کاربرگونه: جستجو → کلیک محصول → کلیک فروشنده → کپی شماره → بعدی."""
+    setup_logging(verbose)
+    if platform != "torob":
+        console.print(f"[red]فعلاً فقط torob پشتیبانی می‌شود (divar در قدم بعدی)[/red]")
+        raise typer.Exit(2)
+    cfg = _cfg(config)
+    if out:
+        cfg.export_dir = out
+    if min_delay is not None:
+        cfg.politeness.min_delay = min_delay
+
+    from .browser import run_torob_browser  # نصب playwright فقط همین‌جا لازم است
+
+    try:
+        result = run_torob_browser(
+            query=query, cfg=cfg, max_products=max_products, headless=headless,
+            min_delay=min_delay, max_shops_per_product=max_shops, record=record,
+            base_url=base_url, selectors_file=selectors_file,
+        )
+    except ImportError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+
+    table = Table(title=f"لیدهای استخراج‌شده — جریان مرورگری {result.platform}")
+    for col in ["#", "عنوان/فروشگاه", "شماره تماس", "کیفیت", "وضعیت", "لینک"]:
+        table.add_column(col, overflow="fold")
+    for i, lead in enumerate(result.leads, 1):
+        table.add_row(
+            str(i), (lead.seller_name or lead.title or "—")[:40],
+            ", ".join(lead.phones) or "—", str(lead.quality_score),
+            lead.status, lead.url[:60],
+        )
+    console.print(table)
+    console.print(f"[cyan]خلاصه:[/cyan] {result.summary()} | مدت: {result.duration_sec}s")
+    for p in result.export_paths.values():
+        console.print(f"[cyan]خروجی:[/cyan] {p}")
+    for k, v in result.artifacts.items():
+        console.print(f"[cyan]{k}:[/cyan] {v}")
+
+
+@app.command()
 def export(
     fmt: str = typer.Option("xlsx", "--format", help="csv | xlsx | json"),
     db: Optional[Path] = typer.Option(None, "--db", help="مسیر دیتابیس"),
