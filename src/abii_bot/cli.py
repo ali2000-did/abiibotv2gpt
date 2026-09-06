@@ -277,6 +277,21 @@ def status(
 
 
 @app.command()
+def dashboard(
+    config: Optional[Path] = ERR,
+    host: str = typer.Option("0.0.0.0", "--host", help="آدرس اتصال (0.0.0.0 = از همه‌جا)"),
+    port: int = typer.Option(8501, "--port", help="پورت داشبورد"),
+):
+    """🖥 داشبورد زنده — وضعیت ربات و کاری که در لحظه انجام می‌دهد."""
+    from .dashboard import get_token, run_dashboard
+
+    cfg = _cfg(config)
+    tok = get_token(cfg)
+    console.print(f"[cyan]توکن دسترسی:[/cyan] {tok}")
+    run_dashboard(cfg, host=host, port=port)
+
+
+@app.command()
 def platforms():
     """فهرست پلتفرم‌های پشتیبانی‌شده."""
     console.print("[green]" + "، ".join(supported_platforms()) + "[/green]")

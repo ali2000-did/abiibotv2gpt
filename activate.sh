@@ -13,6 +13,9 @@ cd "$REPO"
 SERVICE="abii-autorun"
 UNIT="/etc/systemd/system/${SERVICE}.service"
 USER_UNIT="$HOME/.config/systemd/user/${SERVICE}.service"
+DASH_SERVICE="abii-dashboard"
+DASH_UNIT="/etc/systemd/system/${DASH_SERVICE}.service"
+USER_DASH_UNIT="$HOME/.config/systemd/user/${DASH_SERVICE}.service"
 LOG_DIR="$REPO/logs"; LOG_FILE="$LOG_DIR/autorun.log"
 PID_FILE="$LOG_DIR/autorun.pid"
 CRON_TAG="#_abii_autorun"
@@ -48,24 +51,39 @@ do_status() {
   if [ -x ".venv/bin/abii" ]; then
     .venv/bin/abii status 2>/dev/null || true
   fi
+  # ─── داشبورد ───
+  local ip tok dash_up=""
+  systemctl is-active --quiet "$DASH_SERVICE" 2>/dev/null && dash_up=1
+  systemctl --user is-active --quiet "$DASH_SERVICE" 2>/dev/null && dash_up=1
+  if [ -f "$LOG_DIR/dashboard.pid" ] && kill -0 "$(cat "$LOG_DIR/dashboard.pid")" 2>/dev/null; then dash_up=1; fi
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  tok="$(cat data/.dashboard_token 2>/dev/null || true)"
+  echo
+  if [ -n "$dash_up" ]; then
+    echo "🖥  داشبورد زنده: http://${ip:-<آی‌پی-سرور>}:8501/?t=${tok:-<توکن>}"
+  else
+    echo "🖥  داشبورد خاموش است — روشن‌کردن: .venv/bin/abii dashboard"
+  fi
 }
 
 # ═────────────────────────── توقف ═──────────────────────────
 do_off() {
   box "توقف AbiiBot"
   if systemd_running && systemctl cat "$SERVICE" >/dev/null 2>&1; then
-    sudo systemctl disable --now "$SERVICE" 2>/dev/null || true
-    sudo rm -f "$UNIT"; sudo systemctl daemon-reload
+    sudo systemctl disable --now "$SERVICE" "$DASH_SERVICE" 2>/dev/null || true
+    sudo rm -f "$UNIT" "$DASH_UNIT"; sudo systemctl daemon-reload
     ok "سرویس سیستمی حذف شد"
   elif [ -d "$HOME/.config/systemd/user" ] && systemctl --user cat "$SERVICE" >/dev/null 2>&1; then
-    systemctl --user disable --now "$SERVICE" 2>/dev/null || true
-    rm -f "$USER_UNIT"; systemctl --user daemon-reload
+    systemctl --user disable --now "$SERVICE" "$DASH_SERVICE" 2>/dev/null || true
+    rm -f "$USER_UNIT" "$USER_DASH_UNIT"; systemctl --user daemon-reload
     ok "سرویس کاربر حذف شد"
   fi
-  if [ -f "$PID_FILE" ]; then
-    kill "$(cat "$PID_FILE")" 2>/dev/null && ok "فرایند پس‌زمینه متوقف شد" || true
-    rm -f "$PID_FILE"
-  fi
+  for pf in "$PID_FILE" "$LOG_DIR/dashboard.pid"; do
+    if [ -f "$pf" ]; then
+      kill "$(cat "$pf")" 2>/dev/null && ok "فرایند پس‌زمینه متوقف شد ($pf)" || true
+      rm -f "$pf"
+    fi
+  done
   if have crontab && crontab -l 2>/dev/null | grep -q "$CRON_TAG"; then
     crontab -l | grep -v "$CRON_TAG" | crontab - && ok " cron پاک شد"
   fi
@@ -77,11 +95,11 @@ systemd_running() {  # systemd واقعی = فرایند ۱ سیستم
   [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ]
 }
 
-render_unit() {  # $1=مسیر خروجی — User/مسیرها خودکار تشخیص داده می‌شوند
+render_unit() {  # $1=مسیر  $2=نام سرویس  $3=ExecStart  $4=توضیح — همه خودکار
   cat > "$1" <<EOF
 # توسط activate.sh ساخته شد — نیازی به ویرایش دستی نیست
 [Unit]
-Description=AbiiBot اتوران — اسکن خودکار ترب
+Description=AbiiBot $4
 After=network-online.target
 Wants=network-online.target
 
@@ -89,7 +107,7 @@ Wants=network-online.target
 Type=simple
 User=$(id -un)
 WorkingDirectory=$REPO
-ExecStart=$REPO/.venv/bin/abii autorun
+ExecStart=$3
 Restart=always
 RestartSec=30
 KillSignal=SIGINT
@@ -101,30 +119,40 @@ EOF
 }
 
 install_system_service() {  # با sudo (یک بار رمز می‌پرسد) — موفقیت را برمی‌گرداند
-  local tmp; tmp="$(mktemp)"
-  render_unit "$tmp"
+  local tmp1 tmp2
+  tmp1="$(mktemp)"; tmp2="$(mktemp)"
+  render_unit "$tmp1" "$SERVICE" "$REPO/.venv/bin/abii autorun" "اتوران — اسکن خودکار ترب"
+  render_unit "$tmp2" "$DASH_SERVICE" "$REPO/.venv/bin/abii dashboard" "داشبورد زنده"
   if [ "$(id -u)" -eq 0 ]; then
-    cp "$tmp" "$UNIT" && systemctl daemon-reload >/dev/null 2>&1 && systemctl enable --now "$SERVICE" >/dev/null 2>&1
+    cp "$tmp1" "$UNIT" && cp "$tmp2" "$DASH_UNIT" \
+      && systemctl daemon-reload >/dev/null 2>&1 \
+      && systemctl enable --now "$SERVICE" "$DASH_SERVICE" >/dev/null 2>&1
   else
     sudo -n true 2>/dev/null || { echo "  ${Y}برای نصب سرویس دائمی، رمز sudo لازم است (فقط همین یک بار):${N}"; sudo -v || return 1; }
-    sudo cp "$tmp" "$UNIT" && sudo systemctl daemon-reload && sudo systemctl enable --now "$SERVICE"
+    sudo cp "$tmp1" "$UNIT" && sudo cp "$tmp2" "$DASH_UNIT" \
+      && sudo systemctl daemon-reload && sudo systemctl enable --now "$SERVICE" "$DASH_SERVICE"
   fi
-  rm -f "$tmp"
+  rm -f "$tmp1" "$tmp2"
   systemctl is-active --quiet "$SERVICE" 2>/dev/null || {  # نصب موفق نبود → پاکسازی
-    sudo systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
-    sudo rm -f "$UNIT"; sudo systemctl daemon-reload >/dev/null 2>&1 || true
+    sudo systemctl disable --now "$SERVICE" "$DASH_SERVICE" >/dev/null 2>&1 || true
+    sudo rm -f "$UNIT" "$DASH_UNIT"; sudo systemctl daemon-reload >/dev/null 2>&1 || true
     return 1
   }
   ok "سرویس دائمی systemd نصب و شروع شد (بعد از ری‌استارت سرور هم خودش بالا می‌آید)"
+  systemctl is-active --quiet "$DASH_SERVICE" 2>/dev/null \
+    && ok "داشبورد زنده هم فعال شد (پورت 8501)" \
+    || warn "داشبورد بالا نیامد — بعداً: .venv/bin/abii dashboard"
 }
 
 install_user_service() {
   mkdir -p "$HOME/.config/systemd/user"
-  render_unit "$USER_UNIT"
+  render_unit "$USER_UNIT" "$SERVICE" "$REPO/.venv/bin/abii autorun" "اتوران — اسکن خودکار ترب"
+  render_unit "$USER_DASH_UNIT" "$DASH_SERVICE" "$REPO/.venv/bin/abii dashboard" "داشبورد زنده"
   systemctl --user daemon-reload
-  systemctl --user enable --now "$SERVICE"
+  systemctl --user enable --now "$SERVICE" "$DASH_SERVICE"
   systemctl --user is-active --quiet "$SERVICE" 2>/dev/null || return 1
   ok "سرویس کاربر systemd نصب شد"
+  systemctl --user is-active --quiet "$DASH_SERVICE" 2>/dev/null && ok "داشبورد زنده هم فعال شد (پورت 8501)"
   sudo -n loginctl enable-linger "$(id -un)" 2>/dev/null \
     && ok "linger فعال شد (پس از خروج از SSH هم روشن می‌ماند)" \
     || warn "بدون linger، بعد از خروج از سرور سرویس می‌ایستد — با sudo فعال کنید: sudo loginctl enable-linger $(id -un)"
@@ -132,18 +160,22 @@ install_user_service() {
 
 install_cron() {
   local line="@reboot cd $REPO && nohup .venv/bin/abii autorun >> $LOG_FILE 2>&1 & $CRON_TAG"
-  (crontab -l 2>/dev/null | grep -v "$CRON_TAG"; echo "$line") | crontab -
+  local dline="@reboot cd $REPO && nohup .venv/bin/abii dashboard >> $LOG_DIR/dashboard.log 2>&1 & $CRON_TAG"
+  (crontab -l 2>/dev/null | grep -v "$CRON_TAG"; echo "$line"; echo "$dline") | crontab -
   start_nohup
+  start_bg ".venv/bin/abii dashboard" "$LOG_DIR/dashboard.pid" "$LOG_DIR/dashboard.log"
   ok "cron @reboot نصب شد + همین حالا شروع شد"
 }
 
-start_nohup() {
+start_nohup() { start_bg ".venv/bin/abii autorun" "$PID_FILE" "$LOG_FILE"; }
+
+start_bg() {  # $1=فرمان  $2=pidfile  $3=logfile — idempotent
   mkdir -p "$LOG_DIR"
-  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    ok "از قبل روشن است (PID $(cat "$PID_FILE"))"; return
+  if [ -f "$2" ] && kill -0 "$(cat "$2")" 2>/dev/null; then
+    ok "از قبل روشن است (PID $(cat "$2"))"; return
   fi
-  nohup .venv/bin/abii autorun >> "$LOG_FILE" 2>&1 &
-  echo $! > "$PID_FILE"
+  nohup $1 >> "$3" 2>&1 &
+  echo $! > "$2"
 }
 
 wait_first_cycle() {  # شواهد شروع اولین دور را با مهلت بررسی می‌کند
@@ -203,6 +235,8 @@ do_activate() {
   if [ -z "$MODE" ]; then
     warn "نه systemd نه cron — فقط اجرای پس‌زمینه (بدون روشن‌ماندن بعد از ری‌بوت)"
     start_nohup; MODE="nohup"
+    start_bg ".venv/bin/abii dashboard" "$LOG_DIR/dashboard.pid" "$LOG_DIR/dashboard.log" \
+      && ok "داشبورد زنده در پس‌زمینه روشن شد (پورت 8501)"
   fi
 
   # ─── ۴/۴ راستی‌آزمایی دقیق ───
@@ -224,7 +258,13 @@ do_activate() {
 
   # ─── گزارش نهایی ───
   box "✅ ربات فعال شد و کار می‌کند"
+  local ip tok
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  tok="$(cat data/.dashboard_token 2>/dev/null || true)"
+  [ -n "$tok" ] || { sleep 1.5; tok="$(cat data/.dashboard_token 2>/dev/null || true)"; }
   cat <<EOF
+  🖥 داشبورد زنده:   http://${ip:-<آی‌پی-سرور>}:8501/?t=${tok:-<توکن-پس-از-چند-ثانیه>}
+     (اگر از بیرون باز نمی‌شود: sudo ufw allow 8501)
   محصول فعلی:      configs/autorun.yaml  (تغییر: abii set-product "کالای شما")
   خروجی اکسل:      $REPO/exports/
   دیتابیس:         $REPO/data/leads.db
