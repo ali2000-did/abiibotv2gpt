@@ -202,6 +202,7 @@ def set_product(
 @app.command()
 def autorun(
     once: bool = typer.Option(False, "--once", help="فقط یک دور اجرا و خروج (تست)"),
+    explain: bool = typer.Option(False, "--explain", help="نمایش مسیر دقیق اجرا بدون شروع آن"),
     settings_file: Optional[Path] = typer.Option(None, "--settings", help="فایل تنظیمات"),
     config: Optional[Path] = ERR,
 ):
@@ -209,7 +210,7 @@ def autorun(
     import signal
     import threading
 
-    from .autorun import AutorunSettings, default_settings_path, run_forever
+    from .autorun import AutorunSettings, default_settings_path, explain_plan, run_forever
 
     setup_logging(True)
     cfg = _cfg(config)
@@ -219,6 +220,10 @@ def autorun(
     except (FileNotFoundError, ValueError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2)
+
+    if explain:
+        console.print(explain_plan(settings, cfg))
+        return
 
     stop = threading.Event()
 

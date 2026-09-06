@@ -151,6 +151,41 @@ def write_status(
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def explain_plan(settings: "AutorunSettings", cfg: AppConfig) -> str:
+    """نمایش مسیر دقیق اجرا «بدون هیچ درخواست شبکه» — برای اطمینان قبل از اجرا."""
+    from urllib.parse import quote
+
+    ep = cfg.endpoints
+    lines = [
+        "📍 مسیر اجرای ربات (بدون هیچ درخواست شبکه — فقط نقشه):",
+        "",
+        "فاز ۱ — کشف محصولات (API جستجوی ترب):",
+    ]
+    for q in settings.queries:
+        lines.append(f"  ① GET {ep.torob_search.format(query=quote(q, safe=''), page=0)}")
+    lines += [
+        "     └ صفحه بعد: دنبال‌کردن فیلد next پاسخ (تا max_pages)",
+        "",
+        "فاز ۲ — نگاشت فروشنده‌ها (از جزئیات هر محصول):",
+        f"  ② GET {ep.torob_detail.format(prk='PRK', search_id='SEARCH_ID')}",
+        f"     fallback: {ep.torob_detail_v2.format(prk='PRK')}",
+        f"     fallback: {ep.torob_offers.format(prk='PRK')}",
+        "     └ PRK و SEARCH_ID از نتایج فاز ۱ (فیلد more_info_url)",
+        "",
+        "فاز ۳ — برداشت شماره هر فروشگاه (هر فروشگاه فقط یک بار):",
+        f"  ③ GET {ep.torob_shop.format(shop_id='SHOP_ID')}",
+        f"     fallback صفحه وب: {ep.torob_shop_web.format(shop_id='SHOP_ID')}",
+        "  ④ GET سایت اختصاصی فروشنده (اگر داشته باشد) → شماره/ایمیل بیشتر",
+        "",
+        "فاز ۴ — پاکسازی → SQLite → اکسل/CSV در exports/",
+        "",
+        f"🔁 تکرار: هر {settings.every_seconds:,} ثانیه | سقف هر دور: {settings.max_shops} فروشگاه جدید",
+        f"   اسکن افزایشی: فروشگاه دیده‌شده تا {settings.shop_ttl_hours} ساعت دوباره fetch نمی‌شود",
+        f"   محترمانه: {settings.workers} worker، حداقل {settings.min_delay}s بین درخواست‌های هر هاست",
+    ]
+    return "\n".join(lines)
+
+
 def run_forever(
     settings: AutorunSettings,
     cfg: AppConfig,
