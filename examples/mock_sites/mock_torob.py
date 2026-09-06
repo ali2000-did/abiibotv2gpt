@@ -27,7 +27,7 @@ NAME_B = ["موبایل", "کامپیوتر", "دیجیتال", "پارس", "آ�
 # id → dict(name, city, address, phone|None)
 SHOPS: dict[str, dict] = {
     "shop-1": {"name": "فروشگاه رایان تک", "city": "تهران",
-               "address": "تهران، خیابان جمهوری، پاساژ علاءالدین", "phone": "۰۹۱۲-۳۴۵-۶۷۸۹"},
+               "address": "تهران، خیابان جمهوری، پاساژ علاءالدین", "phone": "۰۹۱۲-۷۶۴-۰۹۱۵"},
     "shop-2": {"name": "کالای دیجیتال پارس", "city": "اصفهان",
                "address": "اصفهان، خیابان چهارباغ بالا", "phone": "+98 935 222 3344"},
     "shop-3": {"name": "موبایل شهر", "city": "شیراز",
@@ -72,7 +72,7 @@ for _sid in sorted(SHOPS, key=lambda s: int(s.split("-")[1])):
     if _n >= 5 and SHOPS[_sid]["phone"]:
         _idx += 1
         SHOP_SITES[_sid] = {
-            "extra_phone": f"0921{_n:02d}{_idx:07d}"[:11],  # فقط روی سایت شخصی
+            "extra_phone": f"0921{(_n * 113 + _idx * 2911) % 10**7:07d}",  # فقط روی سایت شخصی
             "email": f"shop{_n}@example-seller.ir",
         }
         if len(SHOP_SITES) >= 6:

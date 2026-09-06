@@ -25,6 +25,7 @@ from ..extraction import extract_phones
 from ..models import Lead, utcnow
 from ..pipeline.cleaner import Deduper, commit_lead, normalize_lead
 from ..pipeline.quality import quality_score
+from ..extraction.phone import split_real_phones
 from ..platforms.base import dig, json_text, walk_phone_values
 from ..storage import LeadStore, export_leads
 from .http_async import AsyncPoliteClient, BlockedError, HttpMetrics
@@ -292,6 +293,7 @@ class TorobShopScanner:
             export_paths = export_leads(
                 leads, out_dir=self.cfg.export_dir, formats=self.cfg.export_formats,
                 name_prefix=f"leads_torob_{utcnow().strftime('%Y%m%d_%H%M%S')}",
+                only_with_contact=True,  # ردیف بدون شماره/ایمیل = داده بی‌ارزش
             )
         self.metrics.duration_sec = round(time.monotonic() - t0, 1)
         self.store.record_run(
@@ -519,6 +521,8 @@ class TorobShopScanner:
         phones, emails = await loop.run_in_executor(
             None, extract_contacts_from_html, html
         )
+        # گلوگاه کیفیت در مسیر غنی‌سازی هم اعمال شود (شماره نمایشی هرگز ادغام نمی‌شود)
+        phones, _junk = split_real_phones(phones)
         new_phones = [p for p in phones if p not in lead.phones]
         new_emails = [e for e in emails if e not in lead.emails]
         if not (new_phones or new_emails):

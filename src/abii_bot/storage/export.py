@@ -51,14 +51,23 @@ def _lead_row(lead: Lead) -> dict:
 
 
 def export_leads(
-    leads: list[Lead], out_dir: Path | str, formats: list[str] | None = None,
+    leads: list[Lead],
+    out_dir: Path | str,
+    formats: list[str] | None = None,
     name_prefix: str = "leads",
+    only_with_contact: bool = False,
 ) -> dict[str, Path]:
-    """تولید فایل‌های خروجی؛ مسیر فایل‌های ساخته‌شده را برمی‌گرداند."""
+    """تولید فایل‌های خروجی؛ مسیر فایل‌های ساخته‌شده را برمی‌گرداند.
+
+    only_with_contact=True → فقط لیدهای دارای شماره یا ایمیل (پیش‌فرض موتور):
+    ردیف‌های بی‌ارزش (بدون هیچ راه تماسی) در اکسل نمی‌آیند.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     formats = formats or ["csv"]
     paths: dict[str, Path] = {}
+    if only_with_contact:
+        leads = [l for l in leads if l.phones or l.emails]
     rows = [_lead_row(l) for l in leads]
 
     if "csv" in formats:

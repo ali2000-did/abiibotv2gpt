@@ -22,7 +22,7 @@ def test_web_adapter_extracts_contact_info():
     lead = adapter.parse_detail(adapter.fetch_detail(refs[0]), refs[0])
 
     assert lead.title == "فروشگاه ایران‌کالا"
-    assert "09123456789" in lead.phones        # از ‎+۹۸۹۱۲... با ارقام فارسی
+    assert "09127640915" in lead.phones        # از ‎+۹۸۹۱۲... با ارقام فارسی
     assert "02188776655" in lead.phones        # ثابت با ارقام فارسی
     assert "sales@iran-kala.example.ir" in lead.emails
     assert lead.phones[0].startswith("09")     # موبایل اول

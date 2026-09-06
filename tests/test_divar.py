@@ -30,7 +30,7 @@ def test_parse_detail_extracts_phone_and_fields():
 
     assert lead.source == "divar"
     assert lead.title == "آپارتمان ۸۵ متری، خیابان ولیعصر"
-    assert "09123456789" in lead.phones
+    assert "09127640915" in lead.phones
     assert lead.phones[0].startswith("09")  # موبایل اول
     assert lead.city == "تهران"
     assert "املاک" in (lead.category or "")

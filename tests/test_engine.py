@@ -122,7 +122,7 @@ def test_export_files_created(first_scan):
     outcome, _ = first_scan
     assert set(outcome.export_paths) >= {"csv", "xlsx"}
     csv_text = outcome.export_paths["csv"].read_text(encoding="utf-8-sig")
-    assert "فروشگاه رایان تک" in csv_text and "09123456789" in csv_text
+    assert "فروشگاه رایان تک" in csv_text and "09127640915" in csv_text
 
 
 def test_seller_site_enrichment(first_scan, mock_module):
@@ -158,9 +158,9 @@ def test_extract_contacts_from_html():
     from abii_bot.engine import extract_contacts_from_html
 
     html = """<html><body><h1>فروشگاه نمونه</h1>
-    <p>تماس: ۰۹۱۲ ۳۴۵ ۶۷۸۹ — info@shop.ir</p></body></html>"""
+    <p>تماس: ۰۹۱۲ ۷۶۴ ۰۹۱۵ — info@shop.ir</p></body></html>"""
     phones, emails = extract_contacts_from_html(html)
-    assert phones == ["09123456789"] and emails == ["info@shop.ir"]
+    assert phones == ["09127640915"] and emails == ["info@shop.ir"]
 
 
 # ---------------- robustness: کلاینت و fallback ----------------

@@ -119,10 +119,36 @@ class PhoneHit:
     number: str  # ملی: 09123456789 یا 02112345678
     e164: str  # بین‌المللی: +989123456789
     kind: str  # mobile | landline
+    suspicious: bool = False  # فرمت معتبر ولی الگوی نمایشی/بی‌ارزش
 
     @property
     def is_mobile(self) -> bool:
         return self.kind == "mobile"
+
+
+# ─── تشخیص شماره «مشکوک» (فرمت درست، ارزش صفر) ───
+# مثال: 09123456789 (دنباله صعودی)، 09120000000 (همه صفر)، 02112345678
+_SEQ_RUNS = {
+    "1234567", "2345678", "3456789", "4567890", "5678901", "6789012", "7890123", "8901234",
+    "12345678", "23456789", "34567890", "45678901", "56789012", "67890123",
+    "7654321", "8765432", "9876543", "87654321", "98765432",
+}
+
+
+def is_suspicious_local(local: str) -> bool:
+    """رقم‌های محلی (بعد از پیش‌شماره) الگوی نمایشی دارند؟
+
+    همه یکسان (0000000) یا دنباله کامل صعودی/نزولی → شماره واقعی نیست؛
+    فروشنده‌ها برای «نمایش» می‌نویسند یا اسکرپر از متن الگو گرفته است.
+    """
+    if len(local) < 5:
+        return False
+    return len(set(local)) == 1 or local in _SEQ_RUNS
+
+
+def _mark_suspicious(hit: PhoneHit) -> PhoneHit:
+    local = hit.number[4:] if hit.is_mobile else hit.number[3:]
+    return PhoneHit(hit.raw, hit.number, hit.e164, hit.kind, is_suspicious_local(local))
 
 
 def _to_e164(national: str) -> str:
@@ -158,14 +184,26 @@ def extract_phones(text: str, include_landline: bool = True) -> list[PhoneHit]:
             hits.append(PhoneHit(m.group(0), number, _to_e164(number), "landline"))
             taken.append((s, e))
 
-    # حذف تکراری با حفظ ترتیب
+    # حذف تکراری با حفظ ترتیب + پرچم‌گذاری مشکوک‌ها
     seen: set[str] = set()
     unique: list[PhoneHit] = []
     for h in hits:
         if h.number not in seen:
             seen.add(h.number)
-            unique.append(h)
+            unique.append(_mark_suspicious(h))
     return unique
+
+
+def split_real_phones(numbers: list[str]) -> tuple[list[str], list[str]]:
+    """تفکیک (واقعی، مشکوک) از یک لیست شماره نرمال‌شده.
+
+    کاربرد در لایه Lead: شماره‌های مشکوک هرگز وارد خروجی نمی‌شوند.
+    """
+    real, junk = [], []
+    for n in numbers:
+        local = n[4:] if n.startswith("09") else n[3:]
+        (junk if is_suspicious_local(local) else real).append(n)
+    return real, junk
 
 
 def extract_phone_numbers(text: str, mobile_only: bool = False) -> list[str]:

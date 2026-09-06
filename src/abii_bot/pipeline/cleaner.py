@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 from ..extraction.fields import clean_text
+from ..extraction.phone import split_real_phones
 from ..models import Lead
 from .quality import quality_score
 
 
 def normalize_lead(lead: Lead) -> Lead:
-    """پاکسازی همه فیلدها + مرتب‌سازی شماره‌ها (موبایل اول) + امتیاز کیفیت."""
+    """پاکسازی همه فیلدها + مرتب‌سازی شماره‌ها (موبایل اول) + امتیاز کیفیت.
+
+    گلوگاه کیفیت: شماره‌های «مشکوک» (الگوی نمایشی مثل 09123456789 یا همه‌صفر)
+    همین‌جا حذف می‌شوند تا هیچ داده بی‌ارزشی وارد دیتابیس/خروجی نشود.
+    """
     lead.title = clean_text(lead.title, 200)
     lead.seller_name = clean_text(lead.seller_name, 120)
     lead.city = clean_text(lead.city, 60)
@@ -17,8 +22,14 @@ def normalize_lead(lead: Lead) -> Lead:
 
     mobiles = [p for p in lead.phones if p.startswith("09")]
     landlines = [p for p in lead.phones if not p.startswith("09")]
-    # حذف تکراری با حفظ ترتیب
-    lead.phones = list(dict.fromkeys(mobiles + landlines))
+    real, junk = split_real_phones(mobiles + landlines)
+    if junk:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "حذف %s شماره مشکوک/نمایشی از %s: %s", len(junk), lead.source_id, junk
+        )
+    lead.phones = real  # موبایل اول (ترتیب حفظ شده)
     lead.emails = list(dict.fromkeys(lead.emails))
     if not lead.phones:
         lead.phones = []
