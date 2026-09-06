@@ -5,6 +5,7 @@
   • فعالیت لحظه‌ای: در حال اسکن دور چند است یا خواب تا دور بعد (شمارش معکوس)
   • آمار: لیدها، شماره‌ها، نتیجه دور آخر، فایل اکسل آخر
   • لاگ زنده: آخرین خطوط با رنگ
+  • کنترل: دکمه شروع/توقف ربات + دانلود اکسل/CSV داده‌های جمع‌آوری‌شده
 
 اجرا:  abii dashboard   →  http://SERVER-IP:8501/?t=TOKEN
 توکن یک‌بار ساخته می‌شود (data/.dashboard_token) چون شماره‌ها داده حساس‌اند.
@@ -13,10 +14,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import shutil
+import signal
 import subprocess
-import threading
+import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,13 +29,17 @@ from urllib.parse import parse_qs, urlsplit
 
 from .config import AppConfig
 from .models import Lead
-from .storage import LeadStore
+from .storage import LeadStore, export_leads
 
 logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "abii-autorun"
 DASH_SERVICE = "abii-dashboard"
 DEFAULT_PORT = 8501
+UNIT_PATH = Path("/etc/systemd/system/abii-autorun.service")
+USER_UNIT_PATH = Path.home() / ".config/systemd/user/abii-autorun.service"
+PID_FILE = Path("logs/autorun.pid")
+LOG_FILE = Path("logs/autorun.log")
 
 
 # ═══════════════════════════ داده‌ها ═══════════════════════════
@@ -53,29 +62,118 @@ def get_token(cfg: AppConfig) -> str:
     return tok
 
 
+def _run(cmd: list[str]) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """زنده = فرایند واقعاً در حال اجرا (زامبی = مرده)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        state = stat.rpartition(")")[2].split()[0]
+        return state not in ("Z", "X", "x")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def service_state() -> dict:
     """ربات اتوران از کجا/method دارد اجرا می‌شود؟"""
-    for mode, checker in (
-        ("system", lambda: subprocess.run(
-            ["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True
-        ).stdout.strip() == "active"),
-        ("user", lambda: subprocess.run(
-            ["systemctl", "--user", "is-active", SERVICE_NAME], capture_output=True, text=True
-        ).stdout.strip() == "active"),
-    ):
-        try:
-            if checker():
-                return {"running": True, "mode": mode}
-        except Exception:  # noqa: BLE001
-            continue
-    # حالت پس‌زمینه nohup/cron
+    r = _run(["systemctl", "is-active", SERVICE_NAME])
+    if r and r.stdout.strip() == "active":
+        return {"running": True, "mode": "system", "controllable": True}
+    r = _run(["systemctl", "--user", "is-active", SERVICE_NAME])
+    if r and r.stdout.strip() == "active":
+        return {"running": True, "mode": "user", "controllable": True}
     try:
-        pid = int(Path("logs/autorun.pid").read_text().strip())
-        if Path(f"/proc/{pid}").exists():
-            return {"running": True, "mode": "پس‌زمینه"}
+        pid = int(PID_FILE.read_text().strip())
+        if _pid_alive(pid):
+            return {"running": True, "mode": "پس‌زمینه", "controllable": True}
     except Exception:  # noqa: BLE001
         pass
-    return {"running": False, "mode": None}
+    return {"running": False, "mode": None, "controllable": True}
+
+
+def _abii_bin() -> str:
+    return str(Path(sys.executable).parent / "abii")
+
+
+def _spawn_autorun() -> int:
+    """اجرای اتوران در پس‌زمینه (حالت nohup) — PID را برمی‌گرداند."""
+    Path("logs").mkdir(exist_ok=True)
+    logf = open(LOG_FILE, "ab")  # noqa: SIM115
+    proc = subprocess.Popen(
+        [_abii_bin(), "autorun"], stdout=logf, stderr=subprocess.STDOUT,
+        start_new_session=True, cwd=str(Path.cwd()),
+    )
+    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+    return proc.pid
+
+
+def start_bot() -> tuple[bool, str]:
+    """شروع ربات — بهترین روش موجود؛ خروجی: (موفق؟، پیام)."""
+    if service_state()["running"]:
+        return True, "ربات از قبل فعال است"
+    # ۱) سرویس سیستمی systemd (با sudo بدون رمز یا اجرای root)
+    if UNIT_PATH.exists():
+        for cmd in (["sudo", "-n", "systemctl", "start", SERVICE_NAME],
+                    ["systemctl", "start", SERVICE_NAME]):
+            r = _run(cmd)
+            if r and r.returncode == 0:
+                return True, "ربات با سرویس systemd شروع شد"
+    # ۲) سرویس کاربر
+    if USER_UNIT_PATH.exists():
+        r = _run(["systemctl", "--user", "start", SERVICE_NAME])
+        if r and r.returncode == 0:
+            return True, "ربات با سرویس کاربر systemd شروع شد"
+    # ۳) پس‌زمینه (nohup)
+    try:
+        pid = _spawn_autorun()
+        return True, f"ربات در پس‌زمینه شروع شد (PID {pid})"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"شروع نشد: {exc} — از ترمینال: bash activate.sh"
+
+
+def stop_bot() -> tuple[bool, str]:
+    """توقف ربات — تمیز (SIGINT مثل systemd)؛ خروجی: (موفق؟، پیام)."""
+    if not service_state()["running"]:
+        return True, "ربات از قبل متوقف است"
+    # ۱) systemd
+    for stop_cmd in (["sudo", "-n", "systemctl", "stop", SERVICE_NAME],
+                     ["systemctl", "stop", SERVICE_NAME]):
+        if UNIT_PATH.exists():
+            r = _run(stop_cmd)
+            if r and r.returncode == 0 and not service_state()["running"]:
+                return True, "ربات متوقف شد (systemd)"
+    if USER_UNIT_PATH.exists():
+        r = _run(["systemctl", "--user", "stop", SERVICE_NAME])
+        if r and r.returncode == 0 and not service_state()["running"]:
+            return True, "ربات متوقف شد (سرویس کاربر)"
+    # ۲) پس‌زمینه: SIGINT تمیز، بعد از ۱۰ ثانیه SIGTERM
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except Exception:  # noqa: BLE001
+        return False, "ربات در حال اجراست ولی PID پیدا نشد — از ترمینال: bash activate.sh --off"
+    try:
+        os.kill(pid, signal.SIGINT)
+    except ProcessLookupError:
+        PID_FILE.unlink(missing_ok=True)
+        return True, "ربات متوقف شد"
+    except PermissionError:
+        return False, "دسترسی کافی نیست — از ترمینال: bash activate.sh --off"
+    for _ in range(20):
+        if not _pid_alive(pid):
+            PID_FILE.unlink(missing_ok=True)
+            return True, "ربات متوقف شد"
+        time.sleep(0.5)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    PID_FILE.unlink(missing_ok=True)
+    return True, "ربات متوقف شد"
 
 
 def _read_status(cfg: AppConfig) -> dict | None:
@@ -125,9 +223,8 @@ def tail_logs(n: int = 60) -> list[str]:
                 return lines[-n:]
         except Exception:  # noqa: BLE001
             pass
-    log_file = Path("logs/autorun.log")
     try:
-        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
         return lines[-n:]
     except Exception:  # noqa: BLE001
         return []
@@ -158,7 +255,6 @@ def derive_activity(state: dict, status: dict | None) -> dict:
     if err and not nxt:
         return {"code": "error", "text": f"خطا در دور آخر: {err}",
                 "next_in_sec": None, "cycle": (status or {}).get("cycle")}
-    # فایل وضعیت نبود یا دور بعد نرسیده بود → احتمالاً وسط اسکن است
     cyc = (status or {}).get("cycle", 1)
     return {"code": "scan", "text": f"در حال اسکن — دور {cyc}",
             "next_in_sec": None, "cycle": cyc}
@@ -178,78 +274,158 @@ def snapshot(cfg: AppConfig) -> dict:
     }
 
 
+def export_bytes(cfg: AppConfig, fmt: str) -> tuple[bytes, str, str]:
+    """تولید فایل خروجی از دیتابیس → (بایت‌ها، mime، نام فایل)."""
+    leads = LeadStore(cfg.db_path).all_leads()
+    leads = [l for l in leads if l.phones or l.emails]  # فقط ردیف‌های باارزش
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = export_leads(leads, tmp, [fmt], only_with_contact=True)
+        data = paths[fmt].read_bytes()
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if fmt == "xlsx":
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        name = f"abii-leads-{stamp}.xlsx"
+    else:
+        mime = "text/csv; charset=utf-8"
+        name = f"abii-leads-{stamp}.csv"
+    return data, mime, name
+
+
 # ═══════════════════════════ صفحه وب ═══════════════════════════
 _PAGE = """<!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>داشبورد AbiiBot</title>
 <style>
-:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--txt:#e6edf3;--dim:#8b949e;
---green:#2ea043;--red:#f85149;--amber:#d29922;--blue:#388bfd}
+:root{--bg:#0b0f17;--card:#151b27;--card2:#1a2233;--line:#2a3550;--txt:#eef2f8;
+--dim:#93a0b4;--green:#3ddc84;--red:#ff6b6b;--amber:#ffc857;--blue:#5ba8ff;--violet:#b18cff}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--txt);font-family:Vazirmatn,Tahoma,sans-serif;padding:20px;max-width:980px;margin:0 auto}
-h1{font-size:20px;margin-bottom:14px;display:flex;align-items:center;gap:10px}
-.dot{width:14px;height:14px;border-radius:50%;display:inline-block}
-.dot.on{background:var(--green);box-shadow:0 0 12px var(--green);animation:pulse 2s infinite}
-.dot.off{background:var(--red)}
-.dot.warn{background:var(--amber)}
-@keyframes pulse{50%{opacity:.55}}
-.hero{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:14px}
-.hero .state{font-size:22px;font-weight:bold;margin-bottom:4px}
-.hero .sub{color:var(--dim);font-size:14px}
-.hero .count{color:var(--blue);font-variant-numeric:tabular-nums}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
-.card .v{font-size:24px;font-weight:bold;margin-top:2px}
-.card .k{color:var(--dim);font-size:12px}
-.log{background:#0a0e14;border:1px solid var(--line);border-radius:10px;padding:10px;height:300px;overflow-y:auto;direction:ltr;text-align:left;font-family:Consolas,monospace;font-size:12px;line-height:1.7}
-.log .INFO{color:#7ee787}.log .WARNING{color:#d29922}.log .ERROR,.log .CRITICAL{color:#f85149}.log .DEBUG{color:#6e7681}
-.foot{color:var(--dim);font-size:12px;margin-top:10px;text-align:center}
-a{color:var(--blue);text-decoration:none}
+body{background:radial-gradient(1200px 500px at 80% -10%,#16213a 0%,var(--bg) 55%);
+color:var(--txt);font-family:Vazirmatn,Tahoma,sans-serif;padding:20px;max-width:1000px;margin:0 auto}
+h1{font-size:21px;margin-bottom:16px;display:flex;align-items:center;gap:10px;
+background:linear-gradient(90deg,#7ee787,#5ba8ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.dot{width:15px;height:15px;border-radius:50%;display:inline-block;flex:none}
+.dot.on{background:var(--green);box-shadow:0 0 14px var(--green);animation:pulse 1.6s infinite}
+.dot.off{background:var(--red);box-shadow:0 0 10px var(--red)}
+.dot.warn{background:var(--amber);box-shadow:0 0 10px var(--amber)}
+@keyframes pulse{50%{opacity:.5}}
+.hero{background:linear-gradient(135deg,var(--card),var(--card2));border:1px solid var(--line);
+border-radius:16px;padding:20px;margin-bottom:14px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.hero .state{font-size:24px;font-weight:800;margin-bottom:6px}
+.hero .sub{color:var(--dim);font-size:14px;line-height:1.9}
+.bar{height:8px;background:#0d1420;border-radius:99px;margin-top:12px;overflow:hidden;display:none}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--green),var(--blue));
+border-radius:99px;transition:width 1s linear}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.btn{border:1px solid var(--line);background:var(--card);color:var(--txt);border-radius:12px;
+padding:11px 18px;font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;
+transition:transform .12s,box-shadow .12s,opacity .12s}
+.btn:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.4)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.start{background:linear-gradient(135deg,#1d5c3a,#173a2a);border-color:#2f7a4f}
+.btn.stop{background:linear-gradient(135deg,#6b2530,#3f1a22);border-color:#a03a4a}
+.btn.dl{background:linear-gradient(135deg,#1e3a6b,#1a2747);border-color:#2f5aa0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;
+position:relative;overflow:hidden}
+.card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px}
+.card.g1::before{background:var(--green)}.card.g2::before{background:var(--blue)}
+.card.g3::before{background:var(--violet)}.card.g4::before{background:var(--amber)}
+.card.g5::before{background:var(--red)}
+.card .v{font-size:26px;font-weight:800;margin-top:4px;font-variant-numeric:tabular-nums}
+.card .k{color:var(--dim);font-size:12.5px}
+.log{background:#080c13;border:1px solid var(--line);border-radius:14px;padding:12px;height:300px;
+overflow-y:auto;direction:ltr;text-align:left;font-family:Consolas,monospace;font-size:12px;line-height:1.75}
+.log .INFO{color:#7ee787}.log .WARNING{color:#ffc857}
+.log .ERROR,.log .CRITICAL{color:#ff6b6b}.log .DEBUG{color:#5d6b7f}
+.foot{color:var(--dim);font-size:12.5px;margin-top:12px;text-align:center}
+.toast{position:fixed;bottom:22px;right:50%;transform:translateX(50%);background:var(--card2);
+border:1px solid var(--line);border-radius:12px;padding:12px 22px;font-size:14px;font-weight:700;
+box-shadow:0 10px 30px rgba(0,0,0,.5);opacity:0;transition:opacity .25s;pointer-events:none;z-index:9}
+.toast.show{opacity:1}.toast.ok{border-color:#2f7a4f}.toast.err{border-color:#a03a4a}
 </style></head><body>
 <h1><span class="dot off" id="dot"></span> داشبورد AbiiBot</h1>
 <div class="hero">
   <div class="state" id="state">در حال دریافت…</div>
   <div class="sub" id="sub">—</div>
+  <div class="bar" id="bar"><i id="barfill" style="width:0%"></i></div>
+</div>
+<div class="actions">
+  <button class="btn start" id="btn-start">▶ شروع ربات</button>
+  <button class="btn stop" id="btn-stop">■ توقف ربات</button>
+  <button class="btn dl" id="btn-xlsx">⬇ دانلود اکسل</button>
+  <button class="btn dl" id="btn-csv">⬇ دانلود CSV</button>
 </div>
 <div class="grid" id="cards"></div>
 <div class="log" id="log"></div>
 <div class="foot" id="foot">به‌روزرسانی هر ۲ ثانیه — AbiiBot</div>
+<div class="toast" id="toast"></div>
 <script>
-const TOKEN = "__TOKEN__";
 const qs = new URLSearchParams(location.search);
 if (qs.get("t")) localStorage.setItem("abii_t", qs.get("t"));
-const tok = qs.get("t") || localStorage.getItem("abii_t") || TOKEN;
+const tok = qs.get("t") || localStorage.getItem("abii_t") || "";
 const api = (p) => fetch(p + "?t=" + tok).then(r => r.json()).catch(() => null);
 function fmt(n){return (n ?? 0).toLocaleString("fa-IR")}
-function hms(s){if(s==null)return "—";const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=Math.floor(s%60);
+function hms(s){if(s==null)return "—";const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;
   return (h?h+":":"")+String(m).padStart(2,"0")+":"+String(x).padStart(2,"0")}
+let toastTimer=null;
+function toast(msg, ok){
+  const t=document.getElementById("toast");
+  t.textContent=msg; t.className="toast show "+(ok?"ok":"err");
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className="toast",3500);
+}
+async function action(kind){
+  const btn=document.getElementById(kind==="start"?"btn-start":"btn-stop");
+  btn.disabled=true; toast("در حال اجرا…", true);
+  try{
+    const r=await fetch("/api/action?t="+tok,{method:"POST",
+      headers:{"Content-Type":"application/json","X-Token":tok},
+      body:JSON.stringify({action:kind})});
+    const j=await r.json();
+    toast(j.message||"", j.ok);
+  }catch(e){toast("ارتباط با سرور برقرار نشد", false)}
+  refresh();
+}
+document.getElementById("btn-start").onclick=()=>action("start");
+document.getElementById("btn-stop").onclick=()=>{ if(confirm("ربات متوقف شود؟")) action("stop"); };
+document.getElementById("btn-xlsx").onclick=()=>{location.href="/api/export?fmt=xlsx&t="+tok;};
+document.getElementById("btn-csv").onclick=()=>{location.href="/api/export?fmt=csv&t="+tok;};
 async function refresh(){
   const st = await api("/api/status");
   if (!st){document.getElementById("state").textContent="⛔ دسترسی ندارید — توکن اشتباه است";return}
   const a = st.activity, sv = st.service;
   const dot = document.getElementById("dot");
   dot.className = "dot " + (sv.running ? (a.code==="error"?"warn":"on") : "off");
-  const stateEl = document.getElementById("state");
-  const names = {scan:"🟢 در حال اسکن", sleep:"🟢 فعال — بین دو دور", error:"🟡 فعال با خطا", off:"🔴 متوقف"};
-  stateEl.textContent = names[a.code] || a.text;
+  const names = {scan:"🟢 در حال اسکن", sleep:"🟢 فعال — استراحت بین دو دور", error:"🟡 فعال با خطا", off:"🔴 ربات متوقف است"};
+  document.getElementById("state").textContent = names[a.code] || a.text;
   let sub = a.text;
   if (a.code === "sleep" && a.next_in_sec != null) sub += " — دور بعدی تا " + hms(a.next_in_sec);
   if (sv.mode) sub += " | روش اجرا: " + ({system:"سرویس دائمی systemd", user:"سرویس کاربر systemd"}[sv.mode] || sv.mode);
   document.getElementById("sub").textContent = sub;
-  const lc = st.last_cycle || {}, m = lc.metrics || {};
+  const bar = document.getElementById("bar");
+  const lc = st.last_cycle || {};
+  if (a.code === "sleep" && lc.next_run_at && lc.finished_at){
+    const total = Date.parse(lc.next_run_at) - Date.parse(lc.finished_at);
+    if (total > 0){
+      bar.style.display="block";
+      document.getElementById("barfill").style.width = Math.min(100, Math.max(0, 100*(1 - a.next_in_sec/total))) + "%";
+    }
+  } else bar.style.display="none";
+  document.getElementById("btn-start").disabled = sv.running;
+  document.getElementById("btn-stop").disabled = !sv.running;
+  const m = lc.metrics || {};
   const cards = [
-    ["فروشگاه‌های دارای تماس", fmt(st.db.with_contact)],
-    ["مجموع شماره‌ها", fmt(st.db.phones)],
-    ["دور آخر: فروشگاه", fmt(m.shops_fetched)],
-    ["دور آخر: شماره جدید", fmt(m.phones_found)],
-    ["خطاها", fmt(m.http_errors ?? 0)],
+    ["🏪 فروشگاه‌های دارای تماس", fmt(st.db.with_contact), "g1"],
+    ["📞 مجموع شماره‌ها", fmt(st.db.phones), "g2"],
+    ["🔄 دور آخر: فروشگاه", fmt(m.shops_fetched), "g3"],
+    ["✨ دور آخر: شماره جدید", fmt(m.phones_found), "g4"],
+    ["⛔ خطاها", fmt(((m.http || {}).errors) ?? m.http_errors ?? 0), "g5"],
   ];
   document.getElementById("cards").innerHTML = cards.map(c =>
-    '<div class="card"><div class="k">'+c[0]+'</div><div class="v">'+c[1]+'</div></div>').join("");
+    '<div class="card '+c[2]+'"><div class="k">'+c[0]+'</div><div class="v">'+c[1]+'</div></div>').join("");
   const ex = st.latest_export;
   document.getElementById("foot").innerHTML = ex
-    ? "آخرین خروجی: " + ex.name + " (" + ex.size_kb + "KB) — به‌روزرسانی هر ۲ ثانیه"
+    ? "آخرین خروجی خودکار: " + ex.name + " (" + ex.size_kb + "KB) — به‌روزرسانی هر ۲ ثانیه"
     : "هنوز فایل خروجی ساخته نشده — به‌روزرسانی هر ۲ ثانیه";
 }
 async function refreshLog(){
@@ -278,18 +454,21 @@ def make_handler(cfg: AppConfig, token: str):
             q = parse_qs(urlsplit(self.path).query)
             got = (q.get("t") or [None])[0] or self.headers.get("X-Token", "")
             if got != token:
-                self.send_response(401)
-                body = "دسترسی ندارید — توکن را در URL بگذارید: ?t=..."
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body.encode())))
-                self.end_headers()
-                self.wfile.write(body.encode())
+                self._text(401, "دسترسی ندارید — توکن را در URL بگذارید: ?t=...")
                 return False
             return True
 
-        def _json(self, obj):
+        def _text(self, code: int, body: str, ctype: str = "text/plain; charset=utf-8"):
+            data = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _json(self, obj, code: int = 200):
             body = json.dumps(obj, ensure_ascii=False).encode()
-            self.send_response(200)
+            self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
@@ -297,10 +476,10 @@ def make_handler(cfg: AppConfig, token: str):
             self.wfile.write(body)
 
         def do_GET(self):
-            path = urlsplit(self.path).path
-            if path == "/" :
-                page = _PAGE.replace("__TOKEN__", token)
-                body = page.encode()
+            parts = urlsplit(self.path)
+            path, q = parts.path, parse_qs(parts.query)
+            if path == "/":
+                body = _PAGE.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -312,9 +491,49 @@ def make_handler(cfg: AppConfig, token: str):
             elif path == "/api/log":
                 if self._check():
                     self._json({"lines": tail_logs(60)})
-            else:
-                self.send_response(404)
+            elif path == "/api/export":
+                if not self._check():
+                    return
+                fmt = (q.get("fmt") or ["xlsx"])[0]
+                if fmt not in ("xlsx", "csv"):
+                    self._json({"ok": False, "message": "فرمت نامعتبر"}, 400)
+                    return
+                try:
+                    data, mime, name = export_bytes(cfg, fmt)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"ok": False, "message": f"خطا در تولید فایل: {exc}"}, 500)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Disposition",
+                                 f"attachment; filename*=UTF-8''{name}")
+                self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._text(404, "نه پیدا شد")
+
+        def do_POST(self):
+            if urlsplit(self.path).path != "/api/action":
+                self._text(404, "نه پیدا شد")
+                return
+            if not self._check():
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:  # noqa: BLE001
+                self._json({"ok": False, "message": "بدنه نامعتبر"}, 400)
+                return
+            act = payload.get("action")
+            if act == "start":
+                ok, msg = start_bot()
+            elif act == "stop":
+                ok, msg = stop_bot()
+            else:
+                self._json({"ok": False, "message": "action باید start یا stop باشد"}, 400)
+                return
+            self._json({"ok": ok, "message": msg})
 
     return Handler
 
